@@ -190,6 +190,8 @@ else()
   set(CMAKE_EXE_LINKER_FLAGS_TRITONRELBUILDWITHASSERTS "/debug:fastlink /INCREMENTAL")
   set(CMAKE_MODULE_LINKER_FLAGS_TRITONRELBUILDWITHASSERTS "/debug:fastlink /INCREMENTAL")
   set(CMAKE_SHARED_LINKER_FLAGS_TRITONRELBUILDWITHASSERTS "/debug:fastlink /INCREMENTAL")
+  # Ensure /bigobj is always set for MSVC (needed for large TU like ir.cc)
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/bigobj>")
 endif()
 
 # Default build type
@@ -322,11 +324,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
 
+  # Remove AMD from codegen backends if the TritonAMD plugin target wasn't created (e.g. LLD not found)
+  if(NOT TARGET TritonAMD)
+    list(REMOVE_ITEM TRITON_CODEGEN_BACKENDS "amd")
+  endif()
+
   if (TRITON_BUILD_PROTON)
     add_subdirectory(third_party/proton)
+    # Add proton to plugin list only when building it
+    list(APPEND TRITON_PLUGIN_NAMES "proton")
   endif()
   # We always build proton dialect
-  list(APPEND TRITON_PLUGIN_NAMES "proton")
   add_subdirectory(third_party/proton/Dialect)
 
   if (DEFINED TRITON_PLUGIN_DIRS)
@@ -374,12 +382,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
     # LLVM
     LLVMPasses
     LLVMNVPTXCodeGen
-    LLVMAMDGPUCodeGen
-    LLVMAMDGPUAsmParser
+    LLVMCodeGen
+    LLVMMIRParser
+    LLVMPlugins
 
     Python3::Module
     pybind11::headers
   )
+  # AMDGPU libs are only available if LLVM was built with AMDGPU target
+  if(EXISTS "${LLVM_LIBRARY_DIR}/LLVMAMDGPUCodeGen.lib" OR EXISTS "${LLVM_LIBRARY_DIR}/libLLVMAMDGPUCodeGen.a")
+    list(APPEND TRITON_LIBRARIES LLVMAMDGPUCodeGen LLVMAMDGPUAsmParser)
+  endif()
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR # Linux arm64
      CMAKE_SYSTEM_PROCESSOR MATCHES "arm64" OR # macOS arm64
      CMAKE_OSX_ARCHITECTURES MATCHES "arm64")  # also macOS arm64
@@ -412,17 +425,19 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
   set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
-  add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
+  set(TRITON_SHARED_SRCS
+                  ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
                   ${PYTHON_SRC_PATH}/gluon_ir.cc
-                  ${CMAKE_CURRENT_SOURCE_DIR}/python/triton/experimental/gsan/src/gsan_testing.cc
                   ${PYTHON_SRC_PATH}/linear_layout.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc
                   ${PYTHON_SRC_PATH}/specialize.cc)
-
-  # Link triton with its dependencies
+  if(NOT MSVC)
+    list(APPEND TRITON_SHARED_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/python/triton/experimental/gsan/src/gsan_testing.cc)
+  endif()
+  add_library(triton SHARED ${TRITON_SHARED_SRCS})
   target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES})
 
   # Do not propagate libraries that libtriton depends on. This ensures that
@@ -470,10 +485,16 @@ if(TRITON_BUILD_PYTHON_MODULE)
       message(FATAL_ERROR "TRITON_WHEEL_DIR must be set.")
   endif()
 
-  configure_file(
-    "${LLVM_SYSPATH}/bin/FileCheck"
-    "${TRITON_WHEEL_DIR}/FileCheck"
-    COPYONLY)
+  set(_filecheck_name "FileCheck")
+  if(WIN32)
+    set(_filecheck_name "FileCheck.exe")
+  endif()
+  if(EXISTS "${LLVM_SYSPATH}/bin/${_filecheck_name}")
+    configure_file(
+      "${LLVM_SYSPATH}/bin/${_filecheck_name}"
+      "${TRITON_WHEEL_DIR}/${_filecheck_name}"
+      COPYONLY)
+  endif()
 
   # Build plugins when building libtriton since they depend on libtriton.
   if(TRITON_EXT_ENABLED)

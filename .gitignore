@@ -109,3 +109,9 @@ AGENTS.override.md
 /wheelhouse/
 
 /python/triton/runtime/tcc/
+
+references/
+*.exe
+*.dll
+*.obj
+*.pyd

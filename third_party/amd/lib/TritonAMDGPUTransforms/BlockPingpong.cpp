@@ -855,7 +855,7 @@ LogicalResult Pingponger::transformChainedDotSchedule(OpBuilder &builder,
 LogicalResult
 Pingponger::transformTwoClusterWithLocalLoadAndAll(OpBuilder &builder,
                                                    Location loc) {
-  Operation *gLoadRhs = useAsyncCopy ? asyncCopyOps[1] : gLoadOps[1];
+  Operation *gLoadRhs = useAsyncCopy ? static_cast<Operation *>(asyncCopyOps[1]) : static_cast<Operation *>(gLoadOps[1]);
   builder.setInsertionPointAfter(gLoadRhs);
   updateOpInsertion(gLoadRhs);
 

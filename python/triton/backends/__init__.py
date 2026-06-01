@@ -56,10 +56,13 @@ def _discover_backends() -> dict[str, Backend]:
 
     # Default path: discover via entry points for out-of-tree/downstream plugins.
     for ep in entry_points().select(group="triton.backends"):
-        compiler = importlib.import_module(f"{ep.value}.compiler")
-        driver = importlib.import_module(f"{ep.value}.driver")
-        backends[ep.name] = Backend(_find_concrete_subclasses(compiler, BaseBackend),  # type: ignore
-                                    _find_concrete_subclasses(driver, DriverBase))  # type: ignore
+        try:
+            compiler = importlib.import_module(f"{ep.value}.compiler")
+            driver = importlib.import_module(f"{ep.value}.driver")
+            backends[ep.name] = Backend(_find_concrete_subclasses(compiler, BaseBackend),  # type: ignore
+                                        _find_concrete_subclasses(driver, DriverBase))  # type: ignore
+        except (ImportError, ModuleNotFoundError):
+            pass  # Skip backends that can't be loaded (e.g. AMD without LLD)
     return backends
 
 

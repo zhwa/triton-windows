@@ -11,13 +11,26 @@
 #define GSAN_HOST_DEVICE
 #endif
 
+#ifdef _MSC_VER
+#include <cstddef>
+#include <cstdint>
+#endif
+
 namespace gsan {
 
+#ifdef _MSC_VER
+using size_t = ::size_t;
+using uint8_t = ::uint8_t;
+using uint16_t = ::uint16_t;
+using uint32_t = ::uint32_t;
+using uintptr_t = ::uintptr_t;
+#else
 using size_t = __SIZE_TYPE__;
 using uint8_t = __UINT8_TYPE__;
 using uint16_t = __UINT16_TYPE__;
 using uint32_t = __UINT32_TYPE__;
 using uintptr_t = __UINTPTR_TYPE__;
+#endif
 
 // Reserve 1 PiB, should be big enough for a while :)
 static constexpr size_t kReserveSize = 1ull << 40;

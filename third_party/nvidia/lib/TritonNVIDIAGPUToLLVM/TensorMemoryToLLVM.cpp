@@ -498,13 +498,18 @@ static void combinePartialReductions(Location loc,
   if (redvalVals.size() <= 1)
     return;
   auto isMin = redOp == TMEMLoadReduceModifier::MIN;
-  auto applyMinMax = [&](Value lhs, Value rhs) {
-    return useNaN ? (isMin ? LLVM::MinimumOp::create(rewriter, loc, lhs, rhs)
-                           : LLVM::MaximumOp::create(rewriter, loc, lhs, rhs))
-                        ->getResult(0)
-                  : (isMin ? LLVM::MinNumOp::create(rewriter, loc, lhs, rhs)
-                           : LLVM::MaxNumOp::create(rewriter, loc, lhs, rhs))
-                        ->getResult(0);
+  auto applyMinMax = [&](Value lhs, Value rhs) -> Value {
+    if (useNaN) {
+      if (isMin)
+        return LLVM::MinimumOp::create(rewriter, loc, lhs, rhs)->getResult(0);
+      else
+        return LLVM::MaximumOp::create(rewriter, loc, lhs, rhs)->getResult(0);
+    } else {
+      if (isMin)
+        return LLVM::MinNumOp::create(rewriter, loc, lhs, rhs)->getResult(0);
+      else
+        return LLVM::MaxNumOp::create(rewriter, loc, lhs, rhs)->getResult(0);
+    }
   };
   // Use tree reduction: pair up elements at each level
   while (redvalVals.size() > 1) {

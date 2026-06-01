@@ -191,7 +191,7 @@ struct AdvanceBasePointer : public OpRewritePattern<scf::ForOp> {
     // multiplication with "elemByteWidth". Potentially this could lead to
     // overflow of 32 bit value, but it should happen only if step or offset is
     // a negative number, i.e. we can discard most significant bits.
-    auto elemsToBytes = [elemByteWidth](const llvm::APInt &x) {
+    auto elemsToBytes = [elemByteWidth, maxOffsetValue](const llvm::APInt &x) {
       return (x * elemByteWidth).getLimitedValue(maxOffsetValue);
     };
     uint32_t blockArgInBytesMax = elemsToBytes(blockArgRangeValue.umax());

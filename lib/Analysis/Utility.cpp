@@ -93,15 +93,16 @@ bool ReduceOpHelper::isAssociative() {
   if (reduce_size <= 2)
     return true;
   bool hasNoAssociativeOp = false;
-  op.walk([&](Operation *nestedOp) -> WalkResult {
-    if (isa<arith::AddFOp, arith::MulFOp>(nestedOp)) {
-      // Only when the data type is float point and reduce size greater than 2,
-      // and has addf or mulf op, we though it's a non-associative reduce.
-      hasNoAssociativeOp = true;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
+  ::mlir::detail::walk<::mlir::ForwardIterator>(
+    op.getOperation(),
+    llvm::function_ref<WalkResult(Operation *)>([&](Operation *nestedOp) -> WalkResult {
+      if (isa<arith::AddFOp, arith::MulFOp>(nestedOp)) {
+        hasNoAssociativeOp = true;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    }),
+    mlir::WalkOrder::PostOrder);
   return !hasNoAssociativeOp;
 }
 

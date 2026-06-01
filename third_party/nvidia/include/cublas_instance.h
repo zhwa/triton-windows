@@ -2,7 +2,7 @@
 #define TRITON_CUBLAS_INSTANCE_H
 
 #include "cublas_types.h"
-#include <dlfcn.h>
+#include "dlfcn_win32.h"
 #include <stdexcept>
 #include <string>
 
