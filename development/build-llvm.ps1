@@ -16,11 +16,29 @@ param(
 #   3. LLVM repo checked out at the commit from triton-windows/cmake/llvm-hash.txt
 #   4. MSVC patches applied (see step1-build-llvm.md)
 #
-# Place this script in the llvm-project root directory (next to the llvm/ folder).
+# Place this script in the development/ directory of triton-windows.
+# LLVM source is expected at build/llvm-project/ (next to the llvm/ folder).
 # ============================================================================
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BuildDir = Join-Path $ScriptDir "build"
+# Find triton root: walk up until we find CMakeLists.txt (supports both
+# development/ (1 level) and .github/skills/.../scripts/ (4 levels))
+$TritonRoot = $ScriptDir
+for ($i = 0; $i -lt 5; $i++) {
+    $TritonRoot = Split-Path -Parent $TritonRoot
+    if (Test-Path (Join-Path $TritonRoot "CMakeLists.txt")) { break }
+}
+if (-not (Test-Path (Join-Path $TritonRoot "CMakeLists.txt"))) {
+    Write-Host "Error: Cannot find triton-windows root from $ScriptDir" -ForegroundColor Red; exit 1
+}
+$LlvmSrcDir = Join-Path $TritonRoot "build\llvm-project"
+$BuildDir = Join-Path $LlvmSrcDir "build"
+
+if (-not (Test-Path "$LlvmSrcDir\llvm")) {
+    Write-Host "Error: LLVM source not found at $LlvmSrcDir" -ForegroundColor Red
+    Write-Host "Clone it: git clone --filter=blob:none https://github.com/llvm/llvm-project.git `"$LlvmSrcDir`"" -ForegroundColor Yellow
+    exit 1
+}
 
 $CmakeBuildType = if ($BuildType -eq "debug") { "Debug" } else { "Release" }
 
@@ -123,7 +141,7 @@ function Invoke-Configure {
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_ENABLE_DIA_SDK=OFF",
         "-DMLIR_BUILD_MLIR_C_DYLIB=OFF",
-        "$ScriptDir\llvm"
+        "$LlvmSrcDir\llvm"
     )
     & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) { Write-Host "Configure failed!" -ForegroundColor Red; exit 1 }

@@ -1,5 +1,5 @@
 param(
-    [string]$BuildType = "debug"
+    [string]$BuildType = "release"
 )
 
 # ============================================================================
@@ -10,7 +10,7 @@ param(
 #
 # Prerequisites:
 #   1. LLVM/MLIR built (see step1-build-llvm.md)
-#   2. nlohmann/json downloaded to references\json
+#   2. nlohmann/json downloaded to build\json
 #   3. Conda env 'mlir-dev' with cmake, ninja, pybind11
 #   4. Visual Studio 2026
 # ============================================================================
@@ -18,9 +18,18 @@ param(
 $ErrorActionPreference = "Continue"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$TritonRoot = Split-Path -Parent $ScriptDir
-$LlvmBuild = Join-Path $TritonRoot "references\llvm-project\build"
-$JsonPath = Join-Path $TritonRoot "references\json"
+# Find triton root: walk up until we find CMakeLists.txt (supports both
+# development/ (1 level) and .github/skills/.../scripts/ (4 levels))
+$TritonRoot = $ScriptDir
+for ($i = 0; $i -lt 5; $i++) {
+    $TritonRoot = Split-Path -Parent $TritonRoot
+    if (Test-Path (Join-Path $TritonRoot "CMakeLists.txt")) { break }
+}
+if (-not (Test-Path (Join-Path $TritonRoot "CMakeLists.txt"))) {
+    Write-Host "Error: Cannot find triton-windows root from $ScriptDir" -ForegroundColor Red; exit 1
+}
+$LlvmBuild = Join-Path $TritonRoot "build\llvm-project\build"
+$JsonPath = Join-Path $TritonRoot "build\json"
 
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "Triton-Windows Build" -ForegroundColor Cyan
@@ -87,7 +96,7 @@ Write-Host "Conda env:  $env:CONDA_PREFIX" -ForegroundColor Green
 
 # === Detect MSVC toolset from conda runtime ===
 $VcVarsVerFlag = ""
-$vcRuntimeInfo = C:\ProgramData\anaconda3\envs\mlir-dev\python.exe -c "import subprocess; r=subprocess.run(['conda','list','vc14_runtime','-n','mlir-dev'],capture_output=True,text=True); print(r.stdout)" 2>$null
+$vcRuntimeInfo = & "$env:CONDA_PREFIX\python.exe" -c "import subprocess; r=subprocess.run(['conda','list','vc14_runtime','-n','$CondaEnv'],capture_output=True,text=True); print(r.stdout)" 2>$null
 $vcRuntimeLine = $vcRuntimeInfo | Select-String "^vc14_runtime"
 if ($vcRuntimeLine) {
     $ver = ($vcRuntimeLine -split '\s+')[1]
@@ -108,7 +117,29 @@ if (-not (Test-Path $vcvars)) {
 }
 Write-Host "Visual Studio: $vsPath" -ForegroundColor Green
 Import-BatchEnvironment $vcvars $VcVarsVerFlag
-Write-Host "MSVC activated (toolset: $VcVarsVerFlag)." -ForegroundColor Green
+
+# Validate vcvars actually selected the requested toolset — it may silently
+# fall back to the default (14.51) when called from certain environments.
+$wrongVersion = $env:VCToolsVersion
+if ($VcVarsVerFlag -and $env:VCToolsVersion -and -not $env:VCToolsVersion.StartsWith("$major.$minor")) {
+    Write-Host "Warning: Requested toolset $major.$minor but got VCToolsVersion=$env:VCToolsVersion" -ForegroundColor Yellow
+    $toolDir = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Where-Object { $_.Name.StartsWith("$major.$minor") } | Select-Object -First 1
+    if ($toolDir -and (Test-Path $toolDir.FullName)) {
+        $correctVersion = $toolDir.Name
+        Write-Host "Forcing toolset $wrongVersion -> $correctVersion" -ForegroundColor Yellow
+        $env:VCToolsInstallDir = "$($toolDir.FullName)\"
+        $env:VCToolsVersion = $correctVersion
+        # Replace ALL occurrences of wrong version in PATH, INCLUDE, LIB, LIBPATH
+        foreach ($var in @("PATH", "INCLUDE", "LIB", "LIBPATH")) {
+            $val = [Environment]::GetEnvironmentVariable($var)
+            if ($val) {
+                $val = $val -replace [regex]::Escape($wrongVersion), $correctVersion
+                [Environment]::SetEnvironmentVariable($var, $val)
+            }
+        }
+    }
+}
+Write-Host "MSVC activated (VCToolsVersion=$env:VCToolsVersion)." -ForegroundColor Green
 
 # === Set Triton build environment ===
 $env:LLVM_SYSPATH = $LlvmBuild
@@ -116,6 +147,8 @@ $env:JSON_SYSPATH = $JsonPath
 $env:TRITON_OFFLINE_BUILD = "1"
 $env:TRITON_BUILD_PROTON = "0"
 $env:TRITON_BUILD_UT = "0"
+$env:CMAKE_PREFIX_PATH = "$env:CONDA_PREFIX\Library"
+$env:TRITON_APPEND_CMAKE_ARGS = "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX\Library"
 
 # Set build type
 if ($BuildType -eq "debug") {
@@ -133,8 +166,24 @@ Write-Host "  JSON_SYSPATH:         $env:JSON_SYSPATH"
 Write-Host "  TRITON_OFFLINE_BUILD: $env:TRITON_OFFLINE_BUILD"
 Write-Host "  TRITON_BUILD_PROTON:  $env:TRITON_BUILD_PROTON"
 Write-Host "  TRITON_BUILD_UT:      $env:TRITON_BUILD_UT"
+Write-Host "  CMAKE_PREFIX_PATH:    $env:CMAKE_PREFIX_PATH"
+Write-Host "  VCToolsVersion:       $env:VCToolsVersion"
 Write-Host "  Build type:           $(if ($BuildType -eq 'debug') {'Debug'} else {'TritonRelBuildWithAsserts'})"
 Write-Host ""
+
+# === Clean stale cmake cache if toolset changed ===
+$BuildCacheDir = Join-Path $TritonRoot "build\cmake.win-amd64-cpython-*"
+$cacheDirs = Get-Item $BuildCacheDir -ErrorAction SilentlyContinue
+foreach ($cacheDir in $cacheDirs) {
+    $cacheFile = Join-Path $cacheDir "CMakeCache.txt"
+    if (Test-Path $cacheFile) {
+        $cachedCompiler = Select-String -Path $cacheFile -Pattern "CMAKE_CXX_COMPILER:.*MSVC[\\/]([0-9.]+)" | ForEach-Object { $_.Matches[0].Groups[1].Value }
+        if ($cachedCompiler -and $cachedCompiler -ne $env:VCToolsVersion) {
+            Write-Host "Cleaning stale cmake cache (was $cachedCompiler, now $($env:VCToolsVersion))..." -ForegroundColor Yellow
+            Remove-Item -Recurse -Force $cacheDir
+        }
+    }
+}
 
 # === Build ===
 Write-Host "=== Building Triton (editable install) ===" -ForegroundColor Yellow

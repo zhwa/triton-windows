@@ -1,7 +1,10 @@
 # Building Triton-Windows on VS 2026: Troubleshooting Guide
 
-This document records every issue encountered while building triton-windows 3.7.0
-on Windows 11 with Visual Studio 2026, and explains the root cause and fix for each.
+All 19 issues encountered building triton-windows 3.7.0 on Windows 11 with VS 2026.
+
+External deps live in `build/` (git-ignored): `build/llvm-project/`, `build/json/`.
+
+Run `python development/inspect-build.py --fix` to auto-detect all issues.
 
 ## Environment
 
