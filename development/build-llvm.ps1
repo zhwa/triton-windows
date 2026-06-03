@@ -11,8 +11,8 @@ param(
 #
 # Prerequisites:
 #   1. Visual Studio 2026 (any edition)
-#   2. Conda env 'mlir-dev' with cmake and ninja:
-#      conda create -n mlir-dev -c conda-forge ninja cmake
+#   2. Conda env 'triton-dev' with cmake and ninja:
+#      conda create -n triton-dev -c conda-forge python=3.12 ninja cmake pip
 #   3. LLVM repo checked out at the commit from triton-windows/cmake/llvm-hash.txt
 #   4. MSVC patches applied (see step1-build-llvm.md)
 #
@@ -64,7 +64,7 @@ function Import-BatchEnvironment {
 }
 
 # === Activate Conda env ===
-$CondaEnv = "mlir-dev"
+$CondaEnv = "triton-dev"
 $CondaRoots = @(
     "$env:USERPROFILE\anaconda3",
     "$env:USERPROFILE\miniconda3",

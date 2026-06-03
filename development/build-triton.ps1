@@ -11,7 +11,7 @@ param(
 # Prerequisites:
 #   1. LLVM/MLIR built (see step1-build-llvm.md)
 #   2. nlohmann/json downloaded to build\json
-#   3. Conda env 'mlir-dev' with cmake, ninja, pybind11
+#   3. Conda env 'triton-dev' with cmake, ninja, pybind11
 #   4. Visual Studio 2026
 # ============================================================================
 
@@ -66,7 +66,7 @@ function Import-BatchEnvironment {
 }
 
 # === Activate Conda env ===
-$CondaEnv = "mlir-dev"
+$CondaEnv = "triton-dev"
 $CondaRoots = @(
     "$env:USERPROFILE\anaconda3",
     "$env:USERPROFILE\miniconda3",

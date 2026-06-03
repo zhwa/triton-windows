@@ -11,8 +11,8 @@ param(
 #
 # Prerequisites:
 #   1. Visual Studio 2026 (any edition)
-#   2. Conda env 'mlir-dev' with cmake and ninja:
-#      conda create -n mlir-dev -c conda-forge ninja cmake
+#   2. Conda env 'triton-dev' with cmake and ninja:
+#      conda create -n triton-dev -c conda-forge python=3.12 ninja cmake pip
 #   3. LLVM repo checked out at the commit from triton-windows/cmake/llvm-hash.txt
 #   4. MSVC patches applied (see step1-build-llvm.md)
 #
@@ -64,7 +64,7 @@ function Import-BatchEnvironment {
 }
 
 # === Activate Conda env ===
-$CondaEnv = "mlir-dev"
+$CondaEnv = "triton-dev"
 $CondaRoots = @(
     "$env:USERPROFILE\anaconda3",
     "$env:USERPROFILE\miniconda3",
@@ -103,6 +103,10 @@ if ($vcRuntimeLine) {
     $major, $minor = $ver.Split('.')[0..1]
     $VcVarsVerFlag = "-vcvars_ver=$major.$minor"
     Write-Host "Conda vc14_runtime: $ver -> MSVC toolset $major.$minor" -ForegroundColor Green
+} else {
+    Write-Host "Warning: vc14_runtime not found in conda env '$CondaEnv'." -ForegroundColor Yellow
+    Write-Host "  VS 2026 default toolset (14.51) has known template bugs." -ForegroundColor Yellow
+    Write-Host "  Install: conda install -n $CondaEnv -c conda-forge vc14_runtime=14.44" -ForegroundColor Yellow
 }
 
 # === Find and activate Visual Studio ===

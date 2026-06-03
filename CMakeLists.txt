@@ -191,7 +191,11 @@ else()
   set(CMAKE_MODULE_LINKER_FLAGS_TRITONRELBUILDWITHASSERTS "/debug:fastlink /INCREMENTAL")
   set(CMAKE_SHARED_LINKER_FLAGS_TRITONRELBUILDWITHASSERTS "/debug:fastlink /INCREMENTAL")
   # Ensure /bigobj is always set for MSVC (needed for large TU like ir.cc)
+  # /Zc:preprocessor needed for FOR_EACH variadic macros in main.cc
+  # /permissive- needed for strict template conformance
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/bigobj>")
+  add_compile_options("/Zc:preprocessor")
+  add_compile_options("/permissive-")
 endif()
 
 # Default build type

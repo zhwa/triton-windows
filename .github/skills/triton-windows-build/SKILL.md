@@ -13,9 +13,30 @@ Parse the user's argument to determine which task to perform.
 ## Prerequisites
 
 - **Visual Studio 2026** with MSVC v143 toolset (14.44) installed
-- **Conda env** `mlir-dev` with cmake, ninja: `conda create -n mlir-dev -c conda-forge ninja cmake`
+- **Conda env** `triton-dev` — dedicated environment for triton development (see below)
 - **Python** 3.10+ (3.14 free-threaded works but shows GIL warnings)
 - **CUDA Toolkit** installed (for NVPTX backend)
+
+## Environment Isolation
+
+**IMPORTANT:** Always use a dedicated conda env for triton development.
+The editable `pip install -e .` replaces any existing triton package.
+Never build into an env that has PyTorch + triton already installed for other work.
+
+```powershell
+# Create a dedicated env (reuses conda's cmake/ninja, avoids duplicating LLVM/PyTorch):
+conda create -n triton-dev -c conda-forge python=3.12 ninja cmake pip
+conda activate triton-dev
+
+# Install PyTorch (needed for testing kernels):
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+
+# Install build dependencies:
+pip install "pybind11>=2.13.1,<3.0" "setuptools>=40.8.0" wheel
+```
+
+The LLVM build in `build/llvm-project/` is shared across envs — it's just static
+libraries, no Python dependency. No need to rebuild LLVM when switching envs.
 
 ## Directory Layout
 
@@ -162,6 +183,7 @@ Build triton-windows. Requires LLVM already built.
    $env:TRITON_APPEND_CMAKE_ARGS = "-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library"
    ```
 3. Install deps: `pip install "pybind11>=2.13.1,<3.0" "setuptools>=40.8.0" wheel`
+   (already done if you followed the Environment Isolation setup above)
 4. Build: `pip install --no-build-isolation --verbose -e .`
 5. Build triton-opt (needed for debugging and lit tests):
    ```powershell
@@ -185,25 +207,28 @@ Print a summary of available tasks and the build workflow.
 
 ---
 
-## Debug vs Release Build Matrix
+## Debug vs Release Build
 
-Only ONE combination works today:
+**`TritonRelBuildWithAsserts` IS the debug mode.** Don't use `DEBUG=1`.
 
-| LLVM Build | Triton Build | CRT | Result |
-|---|---|---|---|
-| **Release** | **TritonRelBuildWithAsserts** (default) | `/MD` + `/MD` | **WORKS** |
-| Release | Debug (`DEBUG=1`) | `/MD` + `/MDd` | **LNK2038** — CRT mismatch |
-| Debug | TritonRelBuildWithAsserts | `/MDd` + `/MD` | **LNK2038** — CRT mismatch |
-| Debug | Debug | `/MDd` + `/MDd` | Works in theory but not tested |
+A true CMake `Debug` build is **impossible** with Release-built LLVM because:
+1. **CRT mismatch** — Debug uses `/MDd`, LLVM Release uses `/MD` → LNK2038
+2. **Python debug symbols** — `_DEBUG` makes Python link `python3XX_d.lib` which doesn't exist
 
-**TritonRelBuildWithAsserts** is the recommended and default mode. It provides:
-- `/Zi` — full PDB debug symbols (set breakpoints, watch variables)
-- `/RTC1` — runtime checks (uninitialized vars, stack corruption)
-- Assertions enabled (no `NDEBUG`)
-- `/debug:fastlink` + `/INCREMENTAL` — fast incremental linking
-- **Note:** No `/O` flag on MSVC → compiles unoptimized (same as Debug perf)
+True Debug would require Debug LLVM + Debug Python + Debug triton — an entirely separate toolchain.
 
-This gives you a **fully debuggable** build without the CRT mismatch headache.
+**`TritonRelBuildWithAsserts` provides everything you need for debugging:**
+
+| Feature | Status |
+|---|---|
+| PDB debug symbols (`/Zi`) | ✓ Set breakpoints, watch variables |
+| Runtime checks (`/RTC1`) | ✓ Stack corruption, uninitialized vars |
+| Assertions | ✓ `NDEBUG` not defined |
+| Incremental linking | ✓ `/INCREMENTAL` for fast rebuilds |
+| Conformant preprocessor | ✓ `/Zc:preprocessor /permissive-` |
+| Optimization | None (`/Od` equivalent — no `/O` flag) |
+
+This is effectively a Debug build with Release CRT — the best of both worlds.
 
 ---
 

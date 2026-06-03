@@ -4,9 +4,9 @@
 Compiles each test kernel to raw TTIR (pre-canonicalization) so that
 triton-opt can be launched under a C++ debugger with any pass combination.
 
-Usage (must use mlir-dev Python with triton 3.7.0):
+Usage (must use triton-dev Python with built triton):
     $env:TRITON_PTXAS_PATH = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/bin/ptxas.exe"
-    C:/ProgramData/anaconda3/envs/mlir-dev/python.exe generate_debug_ir.py
+    conda run -n triton-dev python generate_debug_ir.py
 
 Output: {repo}/.vscode/debug/*.ttir  (one file per kernel)
 """

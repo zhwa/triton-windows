@@ -74,7 +74,7 @@ VS Code configuration files are in `.vscode/`:
 Tests appear in VS Code's **Testing** sidebar (beaker icon). Click the green triangle to run
 a test, or the bug icon to debug it with Python breakpoints.
 
-The test runner uses the **build Python** (`C:\ProgramData\anaconda3\envs\mlir-dev\python.exe`)
+The test runner uses the **build Python** (from the `triton-dev` conda env)
 which has the freshly built triton. Never use a separately installed triton for testing.
 
 ### Debugging C++ Compiler Passes
@@ -104,7 +104,7 @@ Available TTIR files and their primary compiler paths:
 Regenerate TTIR after kernel changes:
 ```powershell
 $env:TRITON_PTXAS_PATH = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/bin/ptxas.exe"
-C:\ProgramData\anaconda3\envs\mlir-dev\python.exe .github/skills/triton-windows-dev/samples/generate_debug_ir.py
+conda run -n triton-dev python .github/skills/triton-windows-dev/samples/generate_debug_ir.py
 ```
 Or use VS Code task: **Terminal > Run Task > triton: generate debug IR**
 
@@ -130,22 +130,22 @@ To debug C++ compiler code during Python kernel JIT compilation:
 Set up VS Code for test discovery and C++ debugging against the **built triton**.
 This is the first task to run on a fresh machine after building triton.
 
-**Important:** All configs use the build Python (`mlir-dev` conda env) that has the
+**Important:** All configs use the build Python (`triton-dev` conda env) that has the
 freshly built triton. Never use a separately pip-installed triton for testing.
 
 Steps:
 
-1. **Install test dependencies** in the build Python (mlir-dev):
+1. **Install test dependencies** in the build Python (triton-dev):
    ```powershell
-   C:\ProgramData\anaconda3\envs\mlir-dev\python.exe -m pip install pytest torch --quiet
+   conda run -n triton-dev pip install pytest torch --quiet
    ```
    Note: `pip install torch` gets CPU-only torch by default. For GPU testing, use:
    ```powershell
-   C:\ProgramData\anaconda3\envs\mlir-dev\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+   conda run -n triton-dev pip install torch --index-url https://download.pytorch.org/whl/cu126
    ```
 
 2. **Create/verify `.vscode/settings.json`** with:
-   - `python.defaultInterpreterPath`: build Python (`C:/ProgramData/anaconda3/envs/mlir-dev/python.exe`)
+   - `python.defaultInterpreterPath`: build Python from `triton-dev` conda env
    - `python.testing.pytestEnabled`: true
    - `python.testing.pytestArgs`: `[".github/skills/triton-windows-dev/samples", "-s", "--tb=short"]`
    - `C_Cpp.default.compileCommands`: `${workspaceFolder}/build/cmake.win-amd64-cpython-3.14/compile_commands.json`
@@ -171,11 +171,11 @@ Steps:
 5. **Create/verify `.vscode/tasks.json`** — rebuild triton, rebuild triton-opt, generate IR, run tests
 6. **Generate debug TTIR files:**
    ```powershell
-   C:\ProgramData\anaconda3\envs\mlir-dev\python.exe .github/skills/triton-windows-dev/samples/generate_debug_ir.py
+   conda run -n triton-dev python .github/skills/triton-windows-dev/samples/generate_debug_ir.py
    ```
 7. **Verify test discovery:**
    ```powershell
-   C:\ProgramData\anaconda3\envs\mlir-dev\python.exe -m pytest .github/skills/triton-windows-dev/samples --collect-only -q
+   conda run -n triton-dev python -m pytest .github/skills/triton-windows-dev/samples --collect-only -q
    ```
 
 ---
