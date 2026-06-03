@@ -1,0 +1,50 @@
+// Test: vector_add kernel through triton-to-linalg (Phase 1)
+// This is the core pattern: splat base_ptr → addptr with offsets → masked load/store
+
+module {
+  tt.func public @vector_add_kernel(
+      %x_ptr: !tt.ptr<f32>, %y_ptr: !tt.ptr<f32>,
+      %out_ptr: !tt.ptr<f32>, %N: i32) {
+    // pid = get_program_id(0)
+    %pid = tt.get_program_id x : i32
+
+    // block_start = pid * BLOCK_SIZE
+    %c256 = arith.constant 256 : i32
+    %block_start = arith.muli %pid, %c256 : i32
+
+    // offsets = block_start + arange(0, 256)
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %block_start_splat = tt.splat %block_start : i32 -> tensor<256xi32>
+    %offsets = arith.addi %block_start_splat, %range : tensor<256xi32>
+
+    // mask = offsets < N
+    %N_splat = tt.splat %N : i32 -> tensor<256xi32>
+    %mask = arith.cmpi slt, %offsets, %N_splat : tensor<256xi32>
+
+    // x_ptrs = x_ptr + offsets
+    %x_base = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %x_ptrs = tt.addptr %x_base, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+
+    // x = load(x_ptrs, mask)
+    %x = tt.load %x_ptrs, %mask : tensor<256x!tt.ptr<f32>>
+
+    // y_ptrs = y_ptr + offsets
+    %y_base = tt.splat %y_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %y_ptrs = tt.addptr %y_base, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+
+    // y = load(y_ptrs, mask)
+    %y = tt.load %y_ptrs, %mask : tensor<256x!tt.ptr<f32>>
+
+    // result = x + y
+    %result = arith.addf %x, %y : tensor<256xf32>
+
+    // out_ptrs = out_ptr + offsets
+    %out_base = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %out_ptrs = tt.addptr %out_base, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+
+    // store(out_ptrs, result, mask)
+    tt.store %out_ptrs, %result, %mask : tensor<256x!tt.ptr<f32>>
+
+    tt.return
+  }
+}
