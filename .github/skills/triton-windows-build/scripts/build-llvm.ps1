@@ -117,7 +117,28 @@ if (-not (Test-Path $vcvars)) {
 }
 Write-Host "Visual Studio: $vsPath" -ForegroundColor Green
 Import-BatchEnvironment $vcvars $VcVarsVerFlag
-Write-Host "MSVC activated." -ForegroundColor Green
+
+# Validate vcvars actually selected the requested toolset — it may silently
+# fall back to the default (14.51) when called from certain environments.
+$wrongVersion = $env:VCToolsVersion
+if ($VcVarsVerFlag -and $env:VCToolsVersion -and -not $env:VCToolsVersion.StartsWith("$major.$minor")) {
+    Write-Host "Warning: Requested toolset $major.$minor but got VCToolsVersion=$env:VCToolsVersion" -ForegroundColor Yellow
+    $toolDir = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Where-Object { $_.Name.StartsWith("$major.$minor") } | Select-Object -First 1
+    if ($toolDir -and (Test-Path $toolDir.FullName)) {
+        $correctVersion = $toolDir.Name
+        Write-Host "Forcing toolset $wrongVersion -> $correctVersion" -ForegroundColor Yellow
+        $env:VCToolsInstallDir = "$($toolDir.FullName)\"
+        $env:VCToolsVersion = $correctVersion
+        foreach ($var in @("PATH", "INCLUDE", "LIB", "LIBPATH")) {
+            $val = [Environment]::GetEnvironmentVariable($var)
+            if ($val) {
+                $val = $val -replace [regex]::Escape($wrongVersion), $correctVersion
+                [Environment]::SetEnvironmentVariable($var, $val)
+            }
+        }
+    }
+}
+Write-Host "MSVC activated (VCToolsVersion=$env:VCToolsVersion)." -ForegroundColor Green
 
 # From here on, stop on errors
 $ErrorActionPreference = "Stop"

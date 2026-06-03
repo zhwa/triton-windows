@@ -111,6 +111,22 @@ def make_issues():
         "TRI-17": Issue("TRI-17", "AMD Not Removed from Tuple", "WARNING",
             "AMD stays in backends when plugin not built.",
             "Add if(NOT TARGET TritonAMD) removal"),
+        # GPU runtime issues (Windows-specific)
+        "TRI-18": Issue("TRI-18", "build.py No MSVC Support", "ERROR",
+            "_find_compiler() missing cl.exe; _build() uses GCC-only flags.",
+            "Add cl.exe detection and MSVC build path in build.py"),
+        "TRI-19": Issue("TRI-19", "driver.py Missing CUDA Paths", "ERROR",
+            "No CUDA include/lib dirs; wrong import library name (nvcuda vs cuda).",
+            "Add CUDA Toolkit paths and use 'cuda' as import library name"),
+        "TRI-20": Issue("TRI-20", "driver.c Not Windows-Compatible", "ERROR",
+            "Uses dlfcn.h, posix_memalign, compound literals, PyObject_HEAD; — all MSVC-incompatible.",
+            "Add Win32 dlfcn shim, _aligned_malloc, remove compound literals, fix PyObject_HEAD"),
+        "TRI-21": Issue("TRI-21", "compiler.py File Locking", "ERROR",
+            "NamedTemporaryFile not closed before os.remove → WinError 32.",
+            "Close fsrc/flog before subprocess and os.remove"),
+        "TRI-22": Issue("TRI-22", "knobs.py EXE Suffix in Env Key", "ERROR",
+            "TRITON_PTXAS.EXE_PATH instead of TRITON_PTXAS_PATH; no PATH fallback.",
+            "Build env key from base name before appending EXE; add shutil.which fallback"),
     }
 
 def fc(p: Path, pat: str) -> bool:
@@ -278,6 +294,68 @@ def inspect(root: Path, llvm: Path, json_d: Path):
         t = bi.read_text(errors="replace")
         if 'entry_points' in t and not re.search(r'except.*Import', t):
             issues["TRI-14"].detected = True
+
+    # TRI-18: build.py missing MSVC support
+    bp = root/"python"/"triton"/"runtime"/"build.py"
+    if bp.exists():
+        t = bp.read_text(errors="replace")
+        if 'shutil.which("cl")' not in t or 'cl.exe' not in t.lower():
+            issues["TRI-18"].detected = True; issues["TRI-18"].details = "_find_compiler lacks cl.exe"
+        if '"-shared"' in t and '/LD' not in t:
+            issues["TRI-18"].detected = True; issues["TRI-18"].details += "; _build() lacks MSVC flags"
+
+    # TRI-19: driver.py missing CUDA paths / wrong library name
+    dp = root/"python"/"triton"/"backends"/"nvidia"/"driver.py"
+    if dp.exists():
+        t = dp.read_text(errors="replace")
+        if "CUDA_PATH" not in t and "NVIDIA GPU Computing Toolkit" not in t:
+            issues["TRI-19"].detected = True; issues["TRI-19"].details = "No CUDA include path for cuda.h"
+        if re.search(r"libraries\s*=\s*\[.nvcuda.\]", t):
+            issues["TRI-19"].detected = True
+            issues["TRI-19"].details = (issues["TRI-19"].details + "; " if issues["TRI-19"].details else "") + \
+                "Import library should be 'cuda' not 'nvcuda'"
+
+    # TRI-20: driver.c not Windows-compatible
+    dc = root/"third_party"/"nvidia"/"backend"/"driver.c"
+    if dc.exists():
+        t = dc.read_text(errors="replace")
+        problems = []
+        if '#include <dlfcn.h>' in t and '#ifdef _WIN32' not in t:
+            problems.append("dlfcn.h without Win32 guard")
+        if 'posix_memalign' in t and '_aligned_malloc' not in t:
+            problems.append("posix_memalign without _aligned_malloc")
+        if re.search(r'PyObject_HEAD\s*;', t):
+            problems.append("PyObject_HEAD; (trailing semicolon)")
+        if re.search(r'\(Extractor\)\{', t):
+            problems.append("compound literal (Extractor){...}")
+        if 'dlopen("libcuda.so.1"' in t and 'nvcuda.dll' not in t:
+            problems.append("hardcoded libcuda.so.1 in dlopen")
+        if problems:
+            issues["TRI-20"].detected = True; issues["TRI-20"].details = "; ".join(problems)
+
+    # TRI-21: compiler.py file locking
+    cp = root/"python"/"triton"/"backends"/"nvidia"/"compiler.py"
+    if cp.exists():
+        t = cp.read_text(errors="replace")
+        # Check if temp files are closed before os.remove
+        if 'NamedTemporaryFile' in t and 'os.remove(fsrc.name)' in t:
+            # If fsrc.close() doesn't appear before os.remove, it's a problem
+            m_close = t.find('fsrc.close()')
+            m_remove = t.find('os.remove(fsrc')
+            if m_close < 0 or (m_remove > 0 and m_close > m_remove):
+                issues["TRI-21"].detected = True
+
+    # TRI-22: knobs.py EXE suffix in env key
+    kp = root/"python"/"triton"/"knobs.py"
+    if kp.exists():
+        t = kp.read_text(errors="replace")
+        # Check if the key is built from binary (which includes .exe) instead of base name
+        if re.search(r'binary\.upper\(\)\.replace.*_PATH', t) and 'key_name' not in t:
+            issues["TRI-22"].detected = True; issues["TRI-22"].details = "Env key includes .exe suffix"
+        if 'shutil.which(self.binary)' not in t and 'class env_nvidia_tool' in t:
+            issues["TRI-22"].detected = True
+            issues["TRI-22"].details = (issues["TRI-22"].details + "; " if issues["TRI-22"].details else "") + \
+                "No PATH fallback for nvidia tools"
 
     return issues
 

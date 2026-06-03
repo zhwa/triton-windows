@@ -1,15 +1,49 @@
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
 #include "cuda.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define RTLD_LAZY 0
+static __declspec(thread) char dlerror_buf[256];
+static __declspec(thread) int dlerror_flag = 0;
+static void dlerror_set(void) {
+  dlerror_flag = 1;
+  FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(), 0, dlerror_buf, sizeof(dlerror_buf), NULL);
+}
+static void *dlopen(const char *name, int flags) {
+  (void)flags;
+  void *h = (void *)LoadLibraryA(name);
+  if (!h) dlerror_set();
+  return h;
+}
+static void *dlsym(void *handle, const char *name) {
+  void *p = (void *)GetProcAddress((HMODULE)handle, name);
+  if (!p) dlerror_set();
+  return p;
+}
+static int dlclose(void *handle) { return FreeLibrary((HMODULE)handle) ? 0 : -1; }
+static const char *dlerror(void) {
+  if (!dlerror_flag) return NULL;
+  dlerror_flag = 0;
+  return dlerror_buf;
+}
+#else
 #include <dlfcn.h>
+#endif
 #include <stdalign.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
 
 typedef struct {
-  PyObject_HEAD;
+  PyObject_HEAD
   _Alignas(alignof(CUtensorMap)) CUtensorMap tensorMap;
 } PyCUtensorMapObject;
 
@@ -17,7 +51,7 @@ typedef enum { ARG_CONSTEXPR = 0, ARG_KERNEL = 1, ARG_TUPLE = 2 } ArgType;
 
 // Annotation struct to know how the argument should be handled.
 typedef struct {
-  PyObject_HEAD;
+  PyObject_HEAD
   PyObject *nested_tuple; // Can be a List of PyKernelArgObjects or None
   ArgType type;
 } PyKernelArgObject;
@@ -337,12 +371,18 @@ typedef CUresult (*cuLaunchKernelEx_t)(const CUlaunchConfig *config,
                                        CUfunction f, void **kernelParams,
                                        void **extra);
 
+#ifdef _WIN32
+#define CUDA_LIB_NAME "nvcuda.dll"
+#else
+#define CUDA_LIB_NAME "libcuda.so.1"
+#endif
+
 #define defineGetFunctionHandle(name, symbolName)                              \
   static symbolName##_t name() {                                               \
     /* Open the shared library */                                              \
-    void *libHandle = dlopen("libcuda.so.1", RTLD_LAZY);                       \
+    void *libHandle = dlopen(CUDA_LIB_NAME, RTLD_LAZY);                        \
     if (!libHandle) {                                                          \
-      PyErr_SetString(PyExc_RuntimeError, "Failed to open libcuda.so.1");      \
+      PyErr_SetString(PyExc_RuntimeError, "Failed to open " CUDA_LIB_NAME);   \
       return NULL;                                                             \
     }                                                                          \
     /* Clear any existing error */                                             \
@@ -352,7 +392,7 @@ typedef CUresult (*cuLaunchKernelEx_t)(const CUlaunchConfig *config,
     const char *err = dlerror();                                               \
     if (err) {                                                                 \
       PyErr_SetString(PyExc_RuntimeError,                                      \
-                      "Failed to retrieve " #symbolName " from libcuda.so.1"); \
+                      "Failed to retrieve " #symbolName " from " CUDA_LIB_NAME); \
       dlclose(libHandle);                                                      \
       return NULL;                                                             \
     }                                                                          \
@@ -463,7 +503,12 @@ static PyObject *PyCUtensorMap_alloc(PyTypeObject *type, Py_ssize_t n_items) {
   void *mem = NULL;
   size_t size = type->tp_basicsize;
 
+#ifdef _WIN32
+  mem = _aligned_malloc(size, 128);
+  if (!mem) {
+#else
   if (posix_memalign(&mem, 128, size) != 0) {
+#endif
     PyErr_NoMemory();
     return NULL;
   }
@@ -477,7 +522,11 @@ static void PyCUtensorMap_dealloc(PyObject *self) {
   Py_TYPE(self)->tp_free(self);
 }
 
+#ifdef _WIN32
+static void PyCUtensorMap_free(void *ptr) { _aligned_free(ptr); }
+#else
 static void PyCUtensorMap_free(void *ptr) { free(ptr); }
+#endif
 
 // clang-format off
 static PyTypeObject PyCUtensorMapType = {
@@ -1179,47 +1228,47 @@ typedef enum {
 
 Extractor extraction_map[EXTRACTOR_TYPE_COUNT] = {
     [EXTRACTOR_UNKOWN_INDEX] =
-        (Extractor){.extract = NULL, .size = 0, .name = NULL},
-    [EXTRACTOR_POINTER_INDEX] = (Extractor){.extract = extractPointer,
+        {.extract = NULL, .size = 0, .name = {NULL}},
+    [EXTRACTOR_POINTER_INDEX] = {.extract = extractPointer,
                                             .size = sizeof(CUdeviceptr),
-                                            .name = NULL},
-    [EXTRACTOR_INT8_INDEX] = (Extractor){.extract = extractI8,
+                                            .name = {NULL}},
+    [EXTRACTOR_INT8_INDEX] = {.extract = extractI8,
                                          .size = sizeof(int8_t),
                                          .name = {"i8"}},
-    [EXTRACTOR_INT16_INDEX] = (Extractor){.extract = extractI16,
+    [EXTRACTOR_INT16_INDEX] = {.extract = extractI16,
                                           .size = sizeof(int16_t),
                                           .name = {"i16"}},
-    [EXTRACTOR_INT32_INDEX] = (Extractor){.extract = extractI32,
+    [EXTRACTOR_INT32_INDEX] = {.extract = extractI32,
                                           .size = sizeof(int32_t),
                                           .name = {"i1", "i32"}},
-    [EXTRACTOR_INT64_INDEX] = (Extractor){.extract = extractI64,
+    [EXTRACTOR_INT64_INDEX] = {.extract = extractI64,
                                           .size = sizeof(int64_t),
                                           .name = {"i64"}},
-    [EXTRACTOR_UINT8_INDEX] = (Extractor){.extract = extractU8,
+    [EXTRACTOR_UINT8_INDEX] = {.extract = extractU8,
                                           .size = sizeof(uint8_t),
                                           .name = {"u8"}},
-    [EXTRACTOR_UINT16_INDEX] = (Extractor){.extract = extractU16,
+    [EXTRACTOR_UINT16_INDEX] = {.extract = extractU16,
                                            .size = sizeof(uint16_t),
                                            .name = {"u16"}},
-    [EXTRACTOR_UINT32_INDEX] = (Extractor){.extract = extractU32,
+    [EXTRACTOR_UINT32_INDEX] = {.extract = extractU32,
                                            .size = sizeof(uint32_t),
                                            .name = {"u1", "u32"}},
-    [EXTRACTOR_UINT64_INDEX] = (Extractor){.extract = extractU64,
+    [EXTRACTOR_UINT64_INDEX] = {.extract = extractU64,
                                            .size = sizeof(uint64_t),
                                            .name = {"u64"}},
-    [EXTRACTOR_FP16_INDEX] = (Extractor){.extract = extractFP16,
+    [EXTRACTOR_FP16_INDEX] = {.extract = extractFP16,
                                          .size = sizeof(uint16_t),
                                          .name = {"fp16"}},
-    [EXTRACTOR_BF16_INDEX] = (Extractor){.extract = extractBF16,
+    [EXTRACTOR_BF16_INDEX] = {.extract = extractBF16,
                                          .size = sizeof(uint16_t),
                                          .name = {"bf16"}},
-    [EXTRACTOR_FP32_INDEX] = (Extractor){.extract = extractFP32,
+    [EXTRACTOR_FP32_INDEX] = {.extract = extractFP32,
                                          .size = sizeof(uint32_t),
                                          .name = {"fp32", "f32"}},
-    [EXTRACTOR_FP64_INDEX] = (Extractor){.extract = extractFP64,
+    [EXTRACTOR_FP64_INDEX] = {.extract = extractFP64,
                                          .size = sizeof(uint64_t),
                                          .name = {"fp64"}},
-    [EXTRACTOR_NVTMADESC_INDEX] = (Extractor){.extract = extractTmaDesc,
+    [EXTRACTOR_NVTMADESC_INDEX] = {.extract = extractTmaDesc,
                                               .size = sizeof(CUtensorMap),
                                               .alignment = alignof(CUtensorMap),
                                               .name = {"nvTmaDesc"}},

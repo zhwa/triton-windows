@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import sysconfig
 import tempfile
 import logging
@@ -24,6 +25,10 @@ def _find_compiler(language: str) -> str:
         cc = os.environ.get("CC")
         if cc is not None:
             return cc
+        if os.name == "nt":
+            cl = shutil.which("cl")
+            if cl is not None:
+                return cl
         clang = shutil.which("clang")
         gcc = shutil.which("gcc")
         cc = gcc if gcc is not None else clang
@@ -37,6 +42,10 @@ def _find_compiler(language: str) -> str:
     if cxx is not None:
         return cxx
 
+    if os.name == "nt":
+        cl = shutil.which("cl")
+        if cl is not None:
+            return cl
     clangxx = shutil.which("clang++")
     gxx = shutil.which("g++")
     cxx = gxx if gxx is not None else clangxx
@@ -72,14 +81,34 @@ def _build(name: str, src: str, srcdir: str, library_dirs: list[str], include_di
     py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
     custom_backend_dirs = knobs.build.backend_dirs
     include_dirs = include_dirs + [srcdir, py_include_dir, *custom_backend_dirs]
-    # for -Wno-psabi, see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=111047
-    cc_cmd = [cc, src, "-O3", "-shared", "-fPIC", "-Wno-psabi", "-o", so]
-    if language == "c++":
-        cc_cmd.insert(3, "-std=c++17")
-    cc_cmd += [_library_flag(lib) for lib in libraries]
-    cc_cmd += [f"-L{dir}" for dir in library_dirs]
-    cc_cmd += [f"-I{dir}" for dir in include_dirs if dir is not None]
-    cc_cmd.extend(ccflags)
+
+    if os.name == "nt" and os.path.basename(cc).lower() in ("cl.exe", "cl"):
+        # MSVC build path
+        py_lib_dir = os.path.join(sys.base_prefix, "libs")
+        cc_cmd = [cc, "/nologo", "/O2", "/LD", "/utf-8", src]
+        if language == "c++":
+            cc_cmd.append("/std:c++17")
+        else:
+            cc_cmd.append("/std:c17")
+        cc_cmd += [f"/I{d}" for d in include_dirs if d is not None]
+        cc_cmd.append(f"/Fe{so}")
+        cc_cmd.append("/link")
+        cc_cmd += [f"/LIBPATH:{d}" for d in library_dirs]
+        cc_cmd.append(f"/LIBPATH:{py_lib_dir}")
+        for lib in libraries:
+            cc_cmd.append(f"{lib}.lib" if not lib.endswith(".lib") else lib)
+        cc_cmd.extend(ccflags)
+    else:
+        # GCC/Clang build path
+        # for -Wno-psabi, see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=111047
+        cc_cmd = [cc, src, "-O3", "-shared", "-fPIC", "-Wno-psabi", "-o", so]
+        if language == "c++":
+            cc_cmd.insert(3, "-std=c++17")
+        cc_cmd += [_library_flag(lib) for lib in libraries]
+        cc_cmd += [f"-L{dir}" for dir in library_dirs]
+        cc_cmd += [f"-I{dir}" for dir in include_dirs if dir is not None]
+        cc_cmd.extend(ccflags)
+
     subprocess.check_call(cc_cmd, stdout=subprocess.DEVNULL)
     return so
 

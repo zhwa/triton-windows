@@ -495,6 +495,11 @@ class CUDABackend(BaseBackend):
             fsrc.write(src)
             fsrc.flush()
             fbin = fsrc.name + '.o'
+            # Close files before subprocess on Windows (file locking)
+            flog_name = flog.name
+            fsrc_name = fsrc.name
+            fsrc.close()
+            flog.close()
 
             debug_info = []
             if knobs.compilation.disable_line_info:
@@ -527,23 +532,23 @@ class CUDABackend(BaseBackend):
 
             ptxas_cmd = [
                 ptxas, *debug_info, *fmad, '-v', *disable_opt, *reg_alloc, *ptx_extra_options, f'--gpu-name={arch}',
-                fsrc.name, '-o', fbin
+                fsrc_name, '-o', fbin
             ]
             try:
-                subprocess.run(ptxas_cmd, check=True, close_fds=False, stderr=flog)
+                subprocess.run(ptxas_cmd, check=True, close_fds=False, stderr=open(flog_name, 'w'))
                 if knobs.nvidia.dump_ptxas_log:
-                    with open(flog.name) as log_file:
+                    with open(flog_name) as log_file:
                         print(log_file.read())
 
-                if os.path.exists(fsrc.name):
-                    os.remove(fsrc.name)
-                if os.path.exists(flog.name):
-                    os.remove(flog.name)
+                if os.path.exists(fsrc_name):
+                    os.remove(fsrc_name)
+                if os.path.exists(flog_name):
+                    os.remove(flog_name)
             except subprocess.CalledProcessError as e:
-                with open(flog.name) as log_file:
+                with open(flog_name) as log_file:
                     log = log_file.read()
-                if os.path.exists(flog.name):
-                    os.remove(flog.name)
+                if os.path.exists(flog_name):
+                    os.remove(flog_name)
 
                 if e.returncode == 255:
                     error = 'Internal Triton PTX codegen error'

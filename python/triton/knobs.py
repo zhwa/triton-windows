@@ -4,6 +4,7 @@ import functools
 import importlib
 import os
 import re
+import shutil
 import subprocess
 import sysconfig
 import pathlib
@@ -194,11 +195,13 @@ class NvidiaTool:
 class env_nvidia_tool(env_base[str, NvidiaTool]):
 
     def __init__(self, binary: str) -> None:
-        binary += sysconfig.get_config_var("EXE")
+        # Build the env var key from the base name (without extension)
+        key_name = binary.upper().replace('-', '_')
+        binary += sysconfig.get_config_var("EXE") or ""
         self.binary = binary
         self.default_path = os.path.join(os.path.dirname(__file__), "backends", "nvidia", "bin", binary)
         # Convert ptxas-blackwell to PTXAS_BLACKWELL, not PTXAS-BLACKWELL
-        super().__init__(f"TRITON_{binary.upper().replace('-', '_')}_PATH")
+        super().__init__(f"TRITON_{key_name}_PATH")
 
     def get(self) -> NvidiaTool:
         return self.transform(getenv(self.key))
@@ -210,6 +213,11 @@ class env_nvidia_tool(env_base[str, NvidiaTool]):
             paths = [path, self.default_path]
         else:
             paths = [self.default_path]
+
+        # Also search PATH as a final fallback
+        which_path = shutil.which(self.binary)
+        if which_path is not None:
+            paths.append(which_path)
 
         for path in paths:
             if tool := NvidiaTool.from_path(path):

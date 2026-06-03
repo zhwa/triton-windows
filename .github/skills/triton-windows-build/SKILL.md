@@ -107,6 +107,11 @@ Run the build inspector and fix any detected issues:
 | TRI-04 | T4 | TRI-13 | (part of T6) |
 | TRI-05 | T5 | TRI-14 | T15 |
 | TRI-06 | T6 | TRI-15 | T14 |
+| TRI-16 | (part of T12) | TRI-18 | T16 |
+| TRI-17 | (part of T13) | TRI-19 | T17 |
+| | | TRI-20 | T18 |
+| | | TRI-21 | T19 |
+| | | TRI-22 | T20 |
 
 ---
 
@@ -158,14 +163,19 @@ Build triton-windows. Requires LLVM already built.
    ```
 3. Install deps: `pip install "pybind11>=2.13.1,<3.0" "setuptools>=40.8.0" wheel`
 4. Build: `pip install --no-build-isolation --verbose -e .`
-5. Remove AMD backend symlink (it causes ImportError since AMD plugin wasn't built):
+5. Build triton-opt (needed for debugging and lit tests):
+   ```powershell
+   cd build/cmake.win-amd64-cpython-3.14
+   ninja triton-opt
+   ```
+6. Remove AMD backend symlink (it causes ImportError since AMD plugin wasn't built):
    ```powershell
    Remove-Item python/triton/backends/amd -ErrorAction SilentlyContinue
    Remove-Item python/triton/language/extra/hip -ErrorAction SilentlyContinue
    Remove-Item python/triton/tools/extra/hip -ErrorAction SilentlyContinue
    ```
    Note: these symlinks get recreated on every `pip install -e .`, so repeat after rebuilding.
-6. Verify: `python -c "import triton; print(triton.__version__)"`
+7. Verify: `python -c "import triton; print(triton.__version__)"`
 
 ---
 
@@ -300,6 +310,140 @@ In main.cc: `#ifdef _MSC_VER` no-op stub for `init_gsan_testing`.
 **T15: Backend discovery** (`python/triton/backends/__init__.py`)
 Wrap entry-point import loop in `try/except (ImportError, ModuleNotFoundError): pass`.
 
+### GPU Runtime Patches (apply to project root)
+
+These patches fix Windows-specific issues in triton's GPU runtime JIT pipeline.
+Without them, `pip install` succeeds but GPU kernel execution fails at runtime.
+
+**T16: MSVC compiler for runtime JIT** (`python/triton/runtime/build.py`)
+In `_find_compiler()`, add `cl.exe` detection on Windows before the `clang`/`gcc` search:
+```python
+if os.name == "nt":
+    cl = shutil.which("cl")
+    if cl is not None:
+        return cl
+```
+Do this for both the C and C++ branches.
+
+In `_build()`, add an MSVC build path when `os.path.basename(cc).lower() in ("cl.exe", "cl")`:
+```python
+if os.name == "nt" and os.path.basename(cc).lower() in ("cl.exe", "cl"):
+    py_lib_dir = os.path.join(sys.base_prefix, "libs")
+    cc_cmd = [cc, "/nologo", "/O2", "/LD", "/utf-8", src]
+    if language == "c++":
+        cc_cmd.append("/std:c++17")
+    else:
+        cc_cmd.append("/std:c17")
+    cc_cmd += [f"/I{d}" for d in include_dirs if d is not None]
+    cc_cmd.append(f"/Fe{so}")
+    cc_cmd.append("/link")
+    cc_cmd += [f"/LIBPATH:{d}" for d in library_dirs]
+    cc_cmd.append(f"/LIBPATH:{py_lib_dir}")
+    for lib in libraries:
+        cc_cmd.append(f"{lib}.lib" if not lib.endswith(".lib") else lib)
+    cc_cmd.extend(ccflags)
+```
+Also add `import sys` to the file's imports.
+
+**T17: CUDA paths and library name** (`python/triton/backends/nvidia/driver.py`)
+Three changes needed:
+
+1. Change `libraries` from `'nvcuda'` to `'cuda'` on Windows (the CUDA driver import library
+   is `cuda.lib`, not `nvcuda.lib`):
+   ```python
+   libraries = ['cuda'] if os.name == "nt" else ['libcuda.so.1']
+   ```
+
+2. Add CUDA Toolkit include path for `cuda.h` to `include_dirs`:
+   ```python
+   if os.name == "nt":
+       _cuda_path = os.environ.get("CUDA_PATH", "")
+       # ... search CUDA_PATH or glob C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*
+       if _cuda_inc and os.path.isdir(_cuda_inc):
+           include_dirs.append(_cuda_inc)
+   ```
+
+3. In `libcuda_dirs()`, add CUDA Toolkit `lib/x64/` directory (where `cuda.lib` lives):
+   ```python
+   if os.name == "nt":
+       dirs = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")]
+       # Add CUDA Toolkit lib/x64/ for cuda.lib
+       _cuda_path = os.environ.get("CUDA_PATH", "")
+       # ... find and append lib/x64 dir
+       return dirs
+   ```
+
+**T18: driver.c Windows compatibility** (`third_party/nvidia/backend/driver.c`)
+Five sub-fixes:
+
+1. Replace `#include <dlfcn.h>` with a Win32 shim (must come AFTER `#include <Python.h>`):
+   ```c
+   #ifdef _WIN32
+   #include <windows.h>
+   // dlopen/dlsym/dlclose/dlerror using LoadLibrary/GetProcAddress
+   // dlerror() must return NULL on no-error (POSIX semantics)
+   #else
+   #include <dlfcn.h>
+   #endif
+   ```
+   CRITICAL: `dlerror()` must track errors with a flag and return NULL when no error
+   occurred. The original POSIX `dlerror()` returns NULL after clearing; a naive
+   `FormatMessageA` wrapper always returns non-NULL which breaks error checks.
+
+2. Add `CUDA_LIB_NAME` macro for the `defineGetFunctionHandle` macro:
+   ```c
+   #ifdef _WIN32
+   #define CUDA_LIB_NAME "nvcuda.dll"
+   #else
+   #define CUDA_LIB_NAME "libcuda.so.1"
+   #endif
+   ```
+
+3. Remove trailing `;` after `PyObject_HEAD` in struct definitions:
+   ```c
+   // WRONG: PyObject_HEAD;  (double semicolon — MSVC C error)
+   // RIGHT: PyObject_HEAD   (macro already includes ;)
+   ```
+
+4. Remove compound literal casts `(Extractor){...}` in the `extraction_map` array.
+   Use plain `{...}` initializers instead. Also change `.name = NULL` to `.name = {NULL}`.
+
+5. Replace `posix_memalign` with `_aligned_malloc`/`_aligned_free` on Windows.
+
+**T19: Temp file locking** (`python/triton/backends/nvidia/compiler.py`)
+In `make_cubin()`, close both `NamedTemporaryFile` handles before running ptxas
+and before `os.remove()`. On Windows, open file handles prevent deletion (WinError 32).
+```python
+with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ptx') as fsrc, \
+    tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
+    fsrc.write(src)
+    fsrc.flush()
+    fbin = fsrc.name + '.o'
+    fsrc_name = fsrc.name
+    flog_name = flog.name
+    fsrc.close()
+    flog.close()
+    # ... use fsrc_name/flog_name instead of fsrc.name/flog.name ...
+```
+
+**T20: knobs.py env var key + PATH fallback** (`python/triton/knobs.py`)
+Two changes in `env_nvidia_tool`:
+
+1. Build the env var key from the base name BEFORE appending the EXE suffix:
+   ```python
+   def __init__(self, binary: str) -> None:
+       key_name = binary.upper().replace('-', '_')
+       binary += sysconfig.get_config_var("EXE") or ""
+       self.binary = binary
+       ...
+       super().__init__(f"TRITON_{key_name}_PATH")
+   ```
+   Without this, the key becomes `TRITON_PTXAS.EXE_PATH` (with the dot).
+
+2. Add `shutil.which(self.binary)` as a fallback in `transform()` so ptxas/cuobjdump
+   are found when CUDA bin is on PATH.
+   Also add `import shutil` to the file's imports.
+
 ---
 
 ## Known Issues Summary
@@ -325,3 +469,8 @@ Wrap entry-point import loop in `try/except (ImportError, ModuleNotFoundError): 
 | 17 | windows.h min/max | ERROR | NOMINMAX not defined |
 | 18 | Backend discovery crash | WARNING | No try/except on import |
 | 19 | GSan testing on MSVC | ERROR | GCC-only code compiled |
+| 20 | Runtime JIT no MSVC | ERROR | _find_compiler/_build GCC-only |
+| 21 | CUDA paths missing | ERROR | No cuda.h include, wrong lib name |
+| 22 | driver.c POSIX-only | ERROR | dlfcn.h, posix_memalign, compound literals |
+| 23 | Temp file locking | ERROR | NamedTemporaryFile not closed before remove |
+| 24 | ptxas env key has .exe | ERROR | TRITON_PTXAS.EXE_PATH bug |

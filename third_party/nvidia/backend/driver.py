@@ -12,8 +12,25 @@ from triton.backends.driver import GPUDriver, decompose_descriptor, expand_signa
 
 dirname = os.path.dirname(os.path.realpath(__file__))
 include_dirs = [os.path.join(dirname, "include")]
+if os.name == "nt":
+    # Add CUDA Toolkit include path for cuda.h on Windows
+    _cuda_inc = None
+    _cuda_path = os.environ.get("CUDA_PATH", "")
+    if _cuda_path:
+        _cuda_inc = os.path.join(_cuda_path, "include")
+    if not _cuda_inc or not os.path.isdir(_cuda_inc):
+        # Search default CUDA install location for newest version
+        import glob as _glob
+        _versions = sorted(_glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*"), reverse=True)
+        for _v in _versions:
+            _cand = os.path.join(_v, "include")
+            if os.path.isdir(_cand):
+                _cuda_inc = _cand
+                break
+    if _cuda_inc and os.path.isdir(_cuda_inc):
+        include_dirs.append(_cuda_inc)
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = ['libcuda.so.1']
+libraries = ['cuda'] if os.name == "nt" else ['libcuda.so.1']
 PyCUtensorMap = None
 PyKernelArg = None
 ARG_CONSTEXPR = None
@@ -26,6 +43,23 @@ GSAN_PER_DEVICE_STATE_STRIDE = 1 << 30
 def libcuda_dirs():
     if env_libcuda_path := knobs.nvidia.libcuda_path:
         return [env_libcuda_path]
+
+    if os.name == "nt":
+        # On Windows, nvcuda.dll is in System32, but cuda.lib (import library) is in CUDA Toolkit
+        dirs = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")]
+        _cuda_path = os.environ.get("CUDA_PATH", "")
+        if _cuda_path:
+            _lib64 = os.path.join(_cuda_path, "lib", "x64")
+            if os.path.isdir(_lib64):
+                dirs.append(_lib64)
+        else:
+            import glob as _glob
+            for _v in sorted(_glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*"), reverse=True):
+                _lib64 = os.path.join(_v, "lib", "x64")
+                if os.path.isdir(_lib64):
+                    dirs.append(_lib64)
+                    break
+        return dirs
 
     libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
     # each line looks like the following:
@@ -52,7 +86,10 @@ def library_dirs():
 
 
 def _cuda_driver_is_active():
-    candidates = ["libcuda.so.1"]
+    if os.name == "nt":
+        candidates = ["nvcuda.dll"]
+    else:
+        candidates = ["libcuda.so.1"]
     try:
         candidates.extend([os.path.join(path, "libcuda.so.1") for path in libcuda_dirs()])
     except Exception:
