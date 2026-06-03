@@ -185,6 +185,28 @@ Print a summary of available tasks and the build workflow.
 
 ---
 
+## Debug vs Release Build Matrix
+
+Only ONE combination works today:
+
+| LLVM Build | Triton Build | CRT | Result |
+|---|---|---|---|
+| **Release** | **TritonRelBuildWithAsserts** (default) | `/MD` + `/MD` | **WORKS** |
+| Release | Debug (`DEBUG=1`) | `/MD` + `/MDd` | **LNK2038** — CRT mismatch |
+| Debug | TritonRelBuildWithAsserts | `/MDd` + `/MD` | **LNK2038** — CRT mismatch |
+| Debug | Debug | `/MDd` + `/MDd` | Works in theory but not tested |
+
+**TritonRelBuildWithAsserts** is the recommended and default mode. It provides:
+- `/Zi` — full PDB debug symbols (set breakpoints, watch variables)
+- `/RTC1` — runtime checks (uninitialized vars, stack corruption)
+- Assertions enabled (no `NDEBUG`)
+- `/debug:fastlink` + `/INCREMENTAL` — fast incremental linking
+- **Note:** No `/O` flag on MSVC → compiles unoptimized (same as Debug perf)
+
+This gives you a **fully debuggable** build without the CRT mismatch headache.
+
+---
+
 ## Critical Build Requirements
 
 | Requirement | Why |
