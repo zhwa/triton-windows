@@ -87,7 +87,7 @@ def bench_vector_add(N=65536):
             for bid in range(n_blocks):
                 kern.set_arg(0, xb); kern.set_arg(1, yb); kern.set_arg(2, ob)
                 kern.set_arg(3, np.int32(N))
-                kern.set_arg(4, np.int32(1)); kern.set_arg(5, np.int32(1)); kern.set_arg(6, np.int32(1))
+                kern.set_arg(4, np.int32(n_blocks)); kern.set_arg(5, np.int32(1)); kern.set_arg(6, np.int32(1))
                 kern.set_arg(7, np.int32(bid)); kern.set_arg(8, np.int32(0)); kern.set_arg(9, np.int32(0))
                 cl.enqueue_nd_range_kernel(queue, kern, (1,), (1,))
         return kern, queue, run

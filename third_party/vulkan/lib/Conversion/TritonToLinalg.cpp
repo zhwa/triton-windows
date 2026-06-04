@@ -814,13 +814,11 @@ static void visitOperand(Value operand, PtrState &state, Location loc,
           // If splatting an integer scalar (offset), use it as the base offset
           // so that pid-dependent offsets propagate through addState
           if (isIntSplat && srcState.scalar) {
+            // Propagate runtime scalar as dynamic offset (enables multi-block
+            // and 2D pointer patterns where pid-dependent values flow through)
             Value idxVal = builder.create<arith::IndexCastOp>(
                 loc, builder.getIndexType(), srcState.scalar);
             state.offsets.push_back(idxVal);
-          } else if (isIntSplat && !srcState.isEmpty() && srcState.getRank() == 0
-                     && !isa<triton::PointerType>(src.getType())) {
-            // Non-pointer scalar source — try to get a dynamic offset
-            state.offsets.push_back(builder.getIndexAttr(0));
           } else {
             state.offsets.push_back(builder.getIndexAttr(0));
           }
