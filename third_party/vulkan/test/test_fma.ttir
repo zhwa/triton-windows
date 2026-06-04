@@ -1,0 +1,24 @@
+// Phase 2: Fused multiply-add: out[i] = a[i] * b[i] + c[i]
+module {
+  tt.func public @fma_kernel(
+      %a_ptr: !tt.ptr<f32>, %b_ptr: !tt.ptr<f32>,
+      %c_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>,
+      %n: i32) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %ab = tt.splat %a_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %ap = tt.addptr %ab, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %a = tt.load %ap : tensor<256x!tt.ptr<f32>>
+    %bb = tt.splat %b_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %bp = tt.addptr %bb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %b = tt.load %bp : tensor<256x!tt.ptr<f32>>
+    %cb = tt.splat %c_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %cp = tt.addptr %cb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %c = tt.load %cp : tensor<256x!tt.ptr<f32>>
+    %ab_mul = arith.mulf %a, %b : tensor<256xf32>
+    %fma = arith.addf %ab_mul, %c : tensor<256xf32>
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %op = tt.addptr %ob, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %op, %fma : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

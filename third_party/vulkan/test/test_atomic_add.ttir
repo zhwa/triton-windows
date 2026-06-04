@@ -1,0 +1,14 @@
+// Phase 2: Atomic add — accumulate x[i] into out[0] using atomic_rmw
+module {
+  tt.func public @atomic_add_kernel(
+      %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp : tensor<256x!tt.ptr<f32>>
+    // Atomic add each element into out[0]
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %old = tt.atomic_rmw fadd, relaxed, gpu, %ob, %x : (tensor<256x!tt.ptr<f32>>, tensor<256xf32>) -> tensor<256xf32>
+    tt.return
+  }
+}

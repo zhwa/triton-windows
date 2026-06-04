@@ -1,0 +1,34 @@
+// Phase 2: Softmax: out[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
+module {
+  tt.func public @softmax_kernel(
+      %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp : tensor<256x!tt.ptr<f32>>
+    // max_val = max(x)
+    %max_val = "tt.reduce"(%x) ({
+    ^bb0(%a0: f32, %a1: f32):
+      %m = arith.maximumf %a0, %a1 : f32
+      tt.reduce.return %m : f32
+    }) {axis = 0 : i32} : (tensor<256xf32>) -> f32
+    // x_shifted = x - max_val (broadcast scalar)
+    %max_bcast = tt.splat %max_val : f32 -> tensor<256xf32>
+    %x_shifted = arith.subf %x, %max_bcast : tensor<256xf32>
+    // exp_x = exp(x_shifted)
+    %exp_x = math.exp %x_shifted : tensor<256xf32>
+    // sum_exp = sum(exp_x)
+    %sum_exp = "tt.reduce"(%exp_x) ({
+    ^bb0(%b0: f32, %b1: f32):
+      %s = arith.addf %b0, %b1 : f32
+      tt.reduce.return %s : f32
+    }) {axis = 0 : i32} : (tensor<256xf32>) -> f32
+    // out = exp_x / sum_exp
+    %sum_bcast = tt.splat %sum_exp : f32 -> tensor<256xf32>
+    %out = arith.divf %exp_x, %sum_bcast : tensor<256xf32>
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %op = tt.addptr %ob, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %op, %out : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

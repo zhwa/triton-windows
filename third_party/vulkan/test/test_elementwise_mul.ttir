@@ -1,0 +1,29 @@
+// Phase 2 test: elementwise multiply (should work like vector_add)
+module {
+  tt.func public @elementwise_mul(%x_ptr: !tt.ptr<f32>, %y_ptr: !tt.ptr<f32>,
+                                   %out_ptr: !tt.ptr<f32>, %N: i32) {
+    %pid = tt.get_program_id x : i32
+    %c256 = arith.constant 256 : i32
+    %block_start = arith.muli %pid, %c256 : i32
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %bs = tt.splat %block_start : i32 -> tensor<256xi32>
+    %offsets = arith.addi %bs, %range : tensor<256xi32>
+    %Ns = tt.splat %N : i32 -> tensor<256xi32>
+    %mask = arith.cmpi slt, %offsets, %Ns : tensor<256xi32>
+
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp, %mask : tensor<256x!tt.ptr<f32>>
+
+    %yb = tt.splat %y_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %yp = tt.addptr %yb, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %y = tt.load %yp, %mask : tensor<256x!tt.ptr<f32>>
+
+    %result = arith.mulf %x, %y : tensor<256xf32>
+
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %op = tt.addptr %ob, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %op, %result, %mask : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

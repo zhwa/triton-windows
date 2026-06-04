@@ -1,0 +1,33 @@
+// Phase 2 test: GELU activation (elementwise with math ops)
+module {
+  tt.func public @gelu_kernel(%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %N: i32) {
+    %pid = tt.get_program_id x : i32
+    %c256 = arith.constant 256 : i32
+    %block_start = arith.muli %pid, %c256 : i32
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %bs = tt.splat %block_start : i32 -> tensor<256xi32>
+    %offsets = arith.addi %bs, %range : tensor<256xi32>
+    %Ns = tt.splat %N : i32 -> tensor<256xi32>
+    %mask = arith.cmpi slt, %offsets, %Ns : tensor<256xi32>
+
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp, %mask : tensor<256x!tt.ptr<f32>>
+
+    // GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    // Simplified: use x * sigmoid(1.702 * x) approximation
+    %c1702 = arith.constant dense<1.702> : tensor<256xf32>
+    %scaled = arith.mulf %x, %c1702 : tensor<256xf32>
+    %neg = arith.negf %scaled : tensor<256xf32>
+    %exp_neg = math.exp %neg : tensor<256xf32>
+    %one = arith.constant dense<1.0> : tensor<256xf32>
+    %denom = arith.addf %one, %exp_neg : tensor<256xf32>
+    %sigmoid = arith.divf %one, %denom : tensor<256xf32>
+    %result = arith.mulf %x, %sigmoid : tensor<256xf32>
+
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %op = tt.addptr %ob, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %op, %result, %mask : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

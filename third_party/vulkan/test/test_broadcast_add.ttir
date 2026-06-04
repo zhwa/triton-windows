@@ -1,0 +1,38 @@
+// Phase 2 test: broadcast add — x[0..32] + bias[0..32] → out[0..32]
+// Tests 1D elementwise addition with two separate loads (different pointers).
+// A true 2D broadcast (expand_dims + broadcast) requires multi-dim pointer
+// support in TritonToLinalg; this tests the elementwise + dual-load pattern.
+module {
+  tt.func public @broadcast_add_kernel(
+      %x_ptr: !tt.ptr<f32>, %bias_ptr: !tt.ptr<f32>,
+      %out_ptr: !tt.ptr<f32>, %M: i32, %N: i32) {
+    %pid = tt.get_program_id x : i32
+    %c32 = arith.constant 32 : i32
+
+    // Column offsets = pid * 32 + [0..32)
+    %col_start = arith.muli %pid, %c32 : i32
+    %range = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+    %cs = tt.splat %col_start : i32 -> tensor<32xi32>
+    %col_offs = arith.addi %cs, %range : tensor<32xi32>
+
+    // Load x[col_offs]
+    %x_base = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %x_ptrs = tt.addptr %x_base, %col_offs : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+    %x = tt.load %x_ptrs : tensor<32x!tt.ptr<f32>>
+
+    // Load bias[col_offs]
+    %bias_base = tt.splat %bias_ptr : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %bias_ptrs = tt.addptr %bias_base, %col_offs : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+    %bias = tt.load %bias_ptrs : tensor<32x!tt.ptr<f32>>
+
+    // out = x + bias
+    %result = arith.addf %x, %bias : tensor<32xf32>
+
+    // Store result
+    %out_base = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+    %out_ptrs = tt.addptr %out_base, %col_offs : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+    tt.store %out_ptrs, %result : tensor<32x!tt.ptr<f32>>
+
+    tt.return
+  }
+}

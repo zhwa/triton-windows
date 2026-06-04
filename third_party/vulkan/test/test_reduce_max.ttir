@@ -1,0 +1,17 @@
+// Phase 2: Reduce max: out = max(x[0..256])
+module {
+  tt.func public @reduce_max_kernel(
+      %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp : tensor<256x!tt.ptr<f32>>
+    %max = "tt.reduce"(%x) ({
+    ^bb0(%arg0: f32, %arg1: f32):
+      %m = arith.maximumf %arg0, %arg1 : f32
+      tt.reduce.return %m : f32
+    }) {axis = 0 : i32} : (tensor<256xf32>) -> f32
+    tt.store %out_ptr, %max : !tt.ptr<f32>
+    tt.return
+  }
+}

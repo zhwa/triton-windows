@@ -496,8 +496,14 @@ struct ReduceConverter : public OpConversionPattern<triton::ReduceOp> {
 
       Value init;
       if (resultShape.empty()) {
-        // Scalar result
-        init = getInitValue(combiner, elemType, loc, rewriter);
+        // Scalar result → 0-d tensor init (linalg.reduce requires tensor)
+        auto initScalar = getInitValue(combiner, elemType, loc, rewriter);
+        auto emptyTensor =
+            rewriter.create<tensor::EmptyOp>(loc, resultShape, elemType);
+        init = rewriter
+                   .create<linalg::FillOp>(loc, ValueRange{initScalar},
+                                           ValueRange{emptyTensor})
+                   .result();
       } else {
         auto emptyTensor =
             rewriter.create<tensor::EmptyOp>(loc, resultShape, elemType);
@@ -533,7 +539,23 @@ struct ReduceConverter : public OpConversionPattern<triton::ReduceOp> {
           b.create<linalg::YieldOp>(nestedLoc, yieldValues);
         });
 
-    rewriter.replaceOp(op, reduceOp->getResults());
+    // If reducing to scalar (1D→scalar), linalg.reduce produces
+    // tensor<f32> (0-d tensor) but tt.reduce expects bare f32.
+    // Extract scalars from 0-d tensor results.
+    SmallVector<Value> results;
+    for (auto result : reduceOp->getResults()) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
+        if (tensorType.getRank() == 0) {
+          auto scalar = rewriter.create<tensor::ExtractOp>(
+              loc, result, ValueRange{});
+          results.push_back(scalar);
+          continue;
+        }
+      }
+      results.push_back(result);
+    }
+    rewriter.replaceOp(op, results);
+
     return success();
   }
 };
@@ -967,11 +989,19 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
 
     // Scalar load
     if (!isa<ShapedType>(op.getResult().getType())) {
-      if (!isa<MemRefType>(ptr.getType()))
+      Value memPtr = ptr;
+      // Handle unranked memref from scalar pointer conversion
+      if (isa<UnrankedMemRefType>(ptr.getType())) {
+        auto elemType =
+            cast<UnrankedMemRefType>(ptr.getType()).getElementType();
+        auto ranked1D = MemRefType::get({1}, elemType);
+        memPtr = rewriter.create<memref::CastOp>(loc, ranked1D, ptr);
+      }
+      if (!isa<MemRefType>(memPtr.getType()))
         return rewriter.notifyMatchFailure(op, "expected memref for scalar load");
       auto zeroMap = AffineMap::getConstantMap(0, rewriter.getContext());
       auto loadVal = rewriter.create<affine::AffineLoadOp>(
-          loc, ptr, zeroMap, ValueRange{});
+          loc, memPtr, zeroMap, ValueRange{});
       rewriter.replaceOp(op, loadVal.getResult());
       return success();
     }
@@ -1055,10 +1085,18 @@ struct StoreConverter : public OpConversionPattern<triton::StoreOp> {
 
     // Scalar store
     if (!isa<ShapedType>(val.getType())) {
-      if (!isa<MemRefType>(ptr.getType()))
+      Value memPtr = ptr;
+      // Handle unranked memref from scalar pointer conversion
+      if (isa<UnrankedMemRefType>(ptr.getType())) {
+        auto elemType =
+            cast<UnrankedMemRefType>(ptr.getType()).getElementType();
+        auto ranked1D = MemRefType::get({1}, elemType);
+        memPtr = rewriter.create<memref::CastOp>(loc, ranked1D, ptr);
+      }
+      if (!isa<MemRefType>(memPtr.getType()))
         return rewriter.notifyMatchFailure(op, "expected memref for scalar store");
       auto zeroMap = AffineMap::getConstantMap(0, rewriter.getContext());
-      rewriter.create<affine::AffineStoreOp>(loc, val, ptr, zeroMap,
+      rewriter.create<affine::AffineStoreOp>(loc, val, memPtr, zeroMap,
                                              ValueRange{});
       rewriter.eraseOp(op);
       return success();
@@ -1081,6 +1119,134 @@ struct StoreConverter : public OpConversionPattern<triton::StoreOp> {
     }
 
     rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// tt.atomic_rmw → sequential load-modify-store loop
+// In single-threaded OpenCL/Vulkan execution, atomics are regular RMW.
+// Handles both:
+//   - Scalar ptr: direct load/op/store
+//   - Splat ptr tensor (all same location): loop accumulating into base[0]
+//   - Offset ptr tensor (addptr): loop with per-element RMW
+struct AtomicRMWConverter
+    : public OpConversionPattern<triton::AtomicRMWOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  static Value applyRMW(OpBuilder &b, Location loc, triton::RMWOp kind,
+                         Value old, Value val) {
+    switch (kind) {
+    case triton::RMWOp::FADD:
+      return b.create<arith::AddFOp>(loc, old, val);
+    case triton::RMWOp::ADD:
+      return b.create<arith::AddIOp>(loc, old, val);
+    case triton::RMWOp::MAX:
+      return b.create<arith::MaxSIOp>(loc, old, val);
+    case triton::RMWOp::MIN:
+      return b.create<arith::MinSIOp>(loc, old, val);
+    case triton::RMWOp::UMAX:
+      return b.create<arith::MaxUIOp>(loc, old, val);
+    case triton::RMWOp::UMIN:
+      return b.create<arith::MinUIOp>(loc, old, val);
+    case triton::RMWOp::AND:
+      return b.create<arith::AndIOp>(loc, old, val);
+    case triton::RMWOp::OR:
+      return b.create<arith::OrIOp>(loc, old, val);
+    case triton::RMWOp::XOR:
+      return b.create<arith::XOrIOp>(loc, old, val);
+    case triton::RMWOp::XCHG:
+      return val; // exchange — just return new value
+    default:
+      llvm_unreachable("unsupported RMW operation");
+    }
+  }
+
+  LogicalResult
+  matchAndRewrite(triton::AtomicRMWOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto rmwKind = op.getAtomicRmwOp();
+    auto ptrVal = adaptor.getPtr();
+    auto valVal = adaptor.getVal();
+
+    // Determine if result is scalar or tensor
+    auto resultType = op.getResult().getType();
+    bool isScalar = !isa<RankedTensorType>(resultType);
+
+    if (isScalar) {
+      // Scalar atomic: ptr is unranked memref, val is scalar
+      auto elemType = resultType;
+      auto rankedTy = MemRefType::get({1}, elemType);
+      auto ranked = rewriter.create<memref::CastOp>(loc, rankedTy, ptrVal);
+      auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      auto old = rewriter.create<memref::LoadOp>(loc, ranked,
+                                                  ValueRange{zero});
+      auto newVal = applyRMW(rewriter, loc, rmwKind, old, valVal);
+      rewriter.create<memref::StoreOp>(loc, newVal, ranked,
+                                        ValueRange{zero});
+      rewriter.replaceOp(op, old);
+      return success();
+    }
+
+    // Tensor atomic: with typeConverter, adaptor gives us memref operands.
+    // ptrVal = memref<NxT> (from tensor<Nx!tt.ptr<T>>)
+    // valVal = memref<NxT> (from tensor<NxT>)
+    auto valOrigTy = cast<RankedTensorType>(op.getVal().getType());
+    auto elemType = valOrigTy.getElementType();
+    auto shape = valOrigTy.getShape();
+    int64_t n = shape[0];
+
+    // Allocate result buffer to hold old values
+    auto resultMemTy = MemRefType::get(shape, elemType);
+    auto resultBuf = rewriter.create<memref::AllocOp>(loc, resultMemTy);
+
+    // Determine if ptr is unranked (from splat — all same location)
+    bool isSplatPtr = isa<UnrankedMemRefType>(ptrVal.getType());
+
+    Value ptrMemref;
+    if (isSplatPtr) {
+      // All pointers to same location — cast to memref<1xelemTy>
+      auto rankedTy = MemRefType::get({1}, elemType);
+      ptrMemref = rewriter.create<memref::CastOp>(loc, rankedTy, ptrVal);
+    } else {
+      ptrMemref = ptrVal;
+    }
+
+    // Build a sequential loop: for i = 0..n
+    auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    auto ub = rewriter.create<arith::ConstantIndexOp>(loc, n);
+    auto step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+
+    // Sequential RMW loop using memref load/store (no tensor ops needed)
+    rewriter.create<scf::ForOp>(
+        loc, zero, ub, step, ValueRange{},
+        [&](OpBuilder &b, Location l, Value iv, ValueRange) {
+          // Load val[i] from memref
+          auto valI = b.create<memref::LoadOp>(l, valVal, ValueRange{iv});
+
+          // Load old value from target
+          Value loadIdx = isSplatPtr ? zero : iv;
+          auto old = b.create<memref::LoadOp>(l, ptrMemref,
+                                              ValueRange{loadIdx});
+
+          // Apply RMW operation
+          auto newVal = applyRMW(b, l, rmwKind, old, valI);
+
+          // Store new value to target
+          b.create<memref::StoreOp>(l, newVal, ptrMemref,
+                                    ValueRange{loadIdx});
+
+          // Save old value into result buffer
+          b.create<memref::StoreOp>(l, old, resultBuf, ValueRange{iv});
+
+          b.create<scf::YieldOp>(l, ValueRange{});
+        });
+
+    // Convert result memref to tensor for replacement
+    auto resultTensorTy = RankedTensorType::get(shape, elemType);
+    auto resultTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, resultTensorTy, resultBuf, /*restrict=*/true, /*writable=*/false);
+    rewriter.replaceOp(op, resultTensor.getResult());
     return success();
   }
 };
@@ -1118,6 +1284,9 @@ void mlir::triton::vulkan::populateTritonToLinalgConversionPatterns(
   patterns.add<AddPtrConverter>(ctx);
   patterns.add<LoadConverter>(ctx);
   patterns.add<StoreConverter>(ctx);
+
+  // Atomics (Phase 2) — uses typeConverter for ptr type resolution
+  patterns.add<AtomicRMWConverter>(typeConverter, ctx);
 
   // Elementwise arith/math on tensors → linalg.generic
   linalg::populateElementwiseToLinalgConversionPatterns(patterns);

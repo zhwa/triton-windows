@@ -1,0 +1,37 @@
+// Phase 2 test: simple matmul C = A @ B (no accumulator, small tiles)
+module {
+  tt.func public @matmul_kernel(
+      %a_ptr: !tt.ptr<f32>, %b_ptr: !tt.ptr<f32>, %c_ptr: !tt.ptr<f32>,
+      %M: i32, %N: i32, %K: i32) {
+    // Simple: each program computes a 16x16 output tile
+    // A is MxK, B is KxN, C is MxN
+    // For simplicity, assume M=N=K=16, one program
+    %c0 = arith.constant 0 : i32
+    %c16 = arith.constant 16 : i32
+    %c256 = arith.constant 256 : i32
+
+    // Load A (16x16) as flat 256 elements
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %ab = tt.splat %a_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %ap = tt.addptr %ab, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %a_flat = tt.load %ap : tensor<256x!tt.ptr<f32>>
+    %a = tt.reshape %a_flat : tensor<256xf32> -> tensor<16x16xf32>
+
+    // Load B (16x16) as flat 256 elements
+    %bb = tt.splat %b_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %bp = tt.addptr %bb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %b_flat = tt.load %bp : tensor<256x!tt.ptr<f32>>
+    %b = tt.reshape %b_flat : tensor<256xf32> -> tensor<16x16xf32>
+
+    // Matmul: C = A @ B
+    %zero = arith.constant dense<0.0> : tensor<16x16xf32>
+    %c = tt.dot %a, %b, %zero : tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>
+
+    // Store C as flat 256
+    %c_flat = tt.reshape %c : tensor<16x16xf32> -> tensor<256xf32>
+    %cb = tt.splat %c_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %cp = tt.addptr %cb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %cp, %c_flat : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

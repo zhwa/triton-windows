@@ -1,0 +1,29 @@
+// Phase 2: SwiGLU activation: out[i] = x[i] * sigmoid(x[i]) * gate[i]
+// sigmoid(x) = 1 / (1 + exp(-x))  =  SiLU(x) * gate
+module {
+  tt.func public @swiglu_kernel(
+      %x_ptr: !tt.ptr<f32>, %gate_ptr: !tt.ptr<f32>,
+      %out_ptr: !tt.ptr<f32>, %n: i32) {
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp : tensor<256x!tt.ptr<f32>>
+    %gb = tt.splat %gate_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %gp = tt.addptr %gb, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %gate = tt.load %gp : tensor<256x!tt.ptr<f32>>
+    // sigmoid(x) = 1 / (1 + exp(-x))
+    %neg_x = arith.negf %x : tensor<256xf32>
+    %exp_neg = math.exp %neg_x : tensor<256xf32>
+    %one = arith.constant dense<1.0> : tensor<256xf32>
+    %denom = arith.addf %one, %exp_neg : tensor<256xf32>
+    %sigmoid = arith.divf %one, %denom : tensor<256xf32>
+    // silu(x) = x * sigmoid(x)
+    %silu = arith.mulf %x, %sigmoid : tensor<256xf32>
+    // swiglu = silu(x) * gate
+    %out = arith.mulf %silu, %gate : tensor<256xf32>
+    %ob = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %op = tt.addptr %ob, %range : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    tt.store %op, %out : tensor<256x!tt.ptr<f32>>
+    tt.return
+  }
+}

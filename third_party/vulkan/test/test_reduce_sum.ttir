@@ -1,0 +1,28 @@
+// Phase 2 test: simple reduction (sum along a 1D block)
+module {
+  tt.func public @reduce_sum_kernel(%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %N: i32) {
+    %pid = tt.get_program_id x : i32
+    %c256 = arith.constant 256 : i32
+    %block_start = arith.muli %pid, %c256 : i32
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %bs = tt.splat %block_start : i32 -> tensor<256xi32>
+    %offsets = arith.addi %bs, %range : tensor<256xi32>
+    %Ns = tt.splat %N : i32 -> tensor<256xi32>
+    %mask = arith.cmpi slt, %offsets, %Ns : tensor<256xi32>
+
+    %xb = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>
+    %xp = tt.addptr %xb, %offsets : tensor<256x!tt.ptr<f32>>, tensor<256xi32>
+    %x = tt.load %xp, %mask : tensor<256x!tt.ptr<f32>>
+
+    // Reduce sum
+    %sum = "tt.reduce"(%x) ({
+    ^bb0(%arg0: f32, %arg1: f32):
+      %add = arith.addf %arg0, %arg1 : f32
+      tt.reduce.return %add : f32
+    }) {axis = 0 : i32} : (tensor<256xf32>) -> f32
+
+    // Store single result
+    tt.store %out_ptr, %sum : !tt.ptr<f32>
+    tt.return
+  }
+}

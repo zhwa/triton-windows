@@ -259,6 +259,10 @@ class OpenCLEmitter:
             self._emit_store(line)
         elif "memref.load" in line:
             self._emit_load(line)
+        elif "memref.expand_shape" in line:
+            self._emit_reshape_alias(line)
+        elif "memref.collapse_shape" in line:
+            self._emit_reshape_alias(line)
         elif "memref.copy" in line:
             self._emit_copy(line)
         elif "cf.br " in line:
@@ -284,6 +288,20 @@ class OpenCLEmitter:
             val = "1"
         elif val == "false":
             val = "0"
+        # Handle special IEEE 754 hex-encoded floats from MLIR
+        if ctype == "float" and re.match(r"^0x[0-9A-Fa-f]+$", val):
+            import struct
+            bits = int(val, 16) & 0xFFFFFFFF
+            fval = struct.unpack('f', struct.pack('I', bits))[0]
+            import math
+            if math.isinf(fval) and fval < 0:
+                val = "-INFINITY"
+            elif math.isinf(fval) and fval > 0:
+                val = "INFINITY"
+            elif math.isnan(fval):
+                val = "NAN"
+            else:
+                val = f"{fval:.8e}f"
         self._line(f"{ctype} {cvar} = {val};")
 
     def _emit_binary_int(self, line: str):
@@ -405,41 +423,122 @@ class OpenCLEmitter:
             self.ssa_map[dst] = self._map_val(src)  # alias, no new var
             self.ssa_types[self._map_val(src)] = src_type
 
-    def _emit_alloc(self, line: str):
-        m = re.match(r"(%[\w]+)\s*=\s*memref\.alloc\(\)\s*:\s*memref<(\d+)x(\w+)>", line)
+    def _emit_reshape_alias(self, line: str):
+        """expand_shape/collapse_shape are view aliases — same 1D buffer."""
+        m = re.match(r"(%[\w]+)\s*=\s*memref\.(expand|collapse)_shape\s+(%[\w]+)", line)
         if m:
-            dst, size, elem = m.group(1), m.group(2), m.group(3)
+            dst, _, src = m.group(1), m.group(2), m.group(3)
+            src_type = self._type_of(src)
+            self._line(f"// {m.group(2)}_shape — alias in OpenCL")
+            self.ssa_map[dst] = self._map_val(src)
+            self.ssa_types[self._map_val(src)] = src_type
+
+    def _emit_alloc(self, line: str):
+        # Handle N-d memrefs: memref<16x16xf32>, memref<256xf32>, memref<f32>
+        m = re.match(r"(%[\w]+)\s*=\s*memref\.alloca?\(\)(?:\s*\{[^}]*\})?\s*:\s*memref<([^>]+)>", line)
+        if m:
+            dst, type_str = m.group(1), m.group(2)
+            # Parse dimensions and element type: "16x16xf32" or "256xf32" or "f32"
+            # Strip storage class if present
+            type_str = re.sub(r',\s*#spirv\.storage_class<\w+>', '', type_str).strip()
+            parts = type_str.split('x')
+            if len(parts) >= 2:
+                elem = parts[-1]
+                dims = [int(d) for d in parts[:-1]]
+            else:
+                elem = parts[0]
+                dims = []
             ctype = self.TYPE_MAP.get(elem, elem)
+            total = 1
+            for d in dims:
+                total *= d
             cvar = self._def_var(dst, "buf", f"{ctype}*")
-            self._line(f"__private {ctype} {cvar}[{size}];")
+            if total > 0:
+                self._line(f"__private {ctype} {cvar}[{total}];")
+            else:
+                self._line(f"__private {ctype} {cvar}[1];")
+
+    @staticmethod
+    def _linearize_nd_index(line: str, idx_parts: list, map_val_fn):
+        """Linearize N-d memref indices to a flat 1D index.
+
+        Extracts dims from type annotation like memref<2x16x16xf32>
+        and computes i*d1*d2 + j*d2 + k.
+        """
+        # Match all dimension numbers from memref<d0 x d1 x ... x type>
+        all_dims = re.findall(r'memref<([\dx]+)x\w+', line)
+        if all_dims:
+            dim_strs = [d for d in all_dims[0].split('x') if d.isdigit()]
+            if len(dim_strs) == len(idx_parts) and len(dim_strs) >= 2:
+                dims = [int(d) for d in dim_strs]
+                # Compute linearized index: i0*s0 + i1*s1 + ... + iN
+                # where s_k = product of dims[k+1:]
+                terms = []
+                for k, idx in enumerate(idx_parts):
+                    stride = 1
+                    for d in dims[k + 1:]:
+                        stride *= d
+                    mapped = map_val_fn(idx)
+                    if stride == 1:
+                        terms.append(mapped)
+                    else:
+                        terms.append(f"{mapped} * {stride}")
+                return " + ".join(terms)
+        return None
 
     def _emit_store(self, line: str):
-        m = re.match(r"memref\.store\s+(%[\w]+),\s*(%[\w]+)\[([^\]]+)\]", line)
+        # Handle indexed, multi-d, and 0-d: %buf[%i], %buf[%i, %j], %buf[]
+        m = re.match(r"memref\.store\s+(%[\w]+),\s*(%[\w]+)\[([^\]]*)\]", line)
         if m:
             val, buf, indices = m.group(1), m.group(2), m.group(3)
-            idx_parts = [i.strip() for i in indices.split(",")]
-            idx_c = "][".join(self._map_val(i) for i in idx_parts)
-            self._line(f"{self._map_val(buf)}[{idx_c}] = {self._map_val(val)};")
+            if indices.strip():
+                idx_parts = [i.strip() for i in indices.split(",")]
+                if len(idx_parts) == 1:
+                    self._line(f"{self._map_val(buf)}[{self._map_val(idx_parts[0])}] = {self._map_val(val)};")
+                else:
+                    idx = self._linearize_nd_index(line, idx_parts, self._map_val)
+                    if idx is None:
+                        idx = "][".join(self._map_val(i) for i in idx_parts)
+                    self._line(f"{self._map_val(buf)}[{idx}] = {self._map_val(val)};")
+            else:
+                self._line(f"{self._map_val(buf)}[0] = {self._map_val(val)};")
 
     def _emit_load(self, line: str):
-        m = re.match(r"(%[\w]+)\s*=\s*memref\.load\s+(%[\w]+)\[([^\]]+)\]", line)
+        m = re.match(r"(%[\w]+)\s*=\s*memref\.load\s+(%[\w]+)\[([^\]]*)\]", line)
         if m:
             dst, buf, indices = m.group(1), m.group(2), m.group(3)
-            idx_parts = [i.strip() for i in indices.split(",")]
-            idx_c = "][".join(self._map_val(i) for i in idx_parts)
             ctype = "float"
             type_m = re.search(r"memref<[\d?x]*x?(\w+)>", line)
             if type_m:
                 ctype = self.TYPE_MAP.get(type_m.group(1), type_m.group(1))
             cvar = self._def_var(dst, "ld", ctype)
-            self._line(f"{ctype} {cvar} = {self._map_val(buf)}[{idx_c}];")
+            if indices.strip():
+                idx_parts = [i.strip() for i in indices.split(",")]
+                if len(idx_parts) == 1:
+                    self._line(f"{ctype} {cvar} = {self._map_val(buf)}[{self._map_val(idx_parts[0])}];")
+                else:
+                    idx = self._linearize_nd_index(line, idx_parts, self._map_val)
+                    if idx is None:
+                        idx = "][".join(self._map_val(i) for i in idx_parts)
+                    self._line(f"{ctype} {cvar} = {self._map_val(buf)}[{idx}];")
+            else:
+                self._line(f"{ctype} {cvar} = {self._map_val(buf)}[0];")
 
     def _emit_copy(self, line: str):
         m = re.match(r"memref\.copy\s+(%[\w]+),\s*(%[\w]+)", line)
         if m:
             src, dst = m.group(1), m.group(2)
-            size_m = re.search(r"memref<(\d+)x", line)
-            size = size_m.group(1) if size_m else "256"
+            # Extract total size from type: memref<256xf32> or memref<16x16xf32>
+            dims = re.findall(r'memref<([\dx]+)x\w+', line)
+            if dims:
+                parts = dims[0].split('x')
+                total = 1
+                for p in parts:
+                    if p.isdigit():
+                        total *= int(p)
+                size = str(total)
+            else:
+                size = "256"
             self._line(f"for (int _ci = 0; _ci < {size}; _ci++)")
             self.indent += 1
             self._line(f"{self._map_val(dst)}[_ci] = {self._map_val(src)}[_ci];")

@@ -42,6 +42,52 @@ public:
         elemType = ptrType.getPointeeType();
       return MemRefType::get(tensorType.getShape(), elemType);
     });
+
+    // Handle materialization when SplatConverter produces an unranked memref
+    // but a consumer expects a ranked memref (e.g., AtomicRMWConverter).
+    addTargetMaterialization([](OpBuilder &builder, Type type,
+                                ValueRange inputs,
+                                Location loc) -> Value {
+      if (inputs.size() != 1)
+        return Value();
+      auto input = inputs[0];
+      if (type == input.getType())
+        return input;
+      // Cast between memref types (unranked ↔ ranked)
+      if ((isa<MemRefType>(type) || isa<UnrankedMemRefType>(type)) &&
+          (isa<MemRefType>(input.getType()) ||
+           isa<UnrankedMemRefType>(input.getType()))) {
+        return builder.create<memref::CastOp>(loc, type, input).getResult();
+      }
+      // tensor → memref (needed when TypeConverter converts tensor<NxT> →
+      // memref<NxT> for AtomicRMWOp's val operand)
+      if (isa<MemRefType>(type) && isa<RankedTensorType>(input.getType())) {
+        return builder.create<bufferization::ToBufferOp>(loc, type, input)
+            .getResult();
+      }
+      return Value();
+    });
+    addSourceMaterialization([](OpBuilder &builder, Type type,
+                                ValueRange inputs,
+                                Location loc) -> Value {
+      if (inputs.size() != 1)
+        return Value();
+      auto input = inputs[0];
+      if (type == input.getType())
+        return input;
+      if ((isa<MemRefType>(type) || isa<UnrankedMemRefType>(type)) &&
+          (isa<MemRefType>(input.getType()) ||
+           isa<UnrankedMemRefType>(input.getType()))) {
+        return builder.create<memref::CastOp>(loc, type, input).getResult();
+      }
+      // memref → tensor (reverse bridge)
+      if (isa<RankedTensorType>(type) && isa<MemRefType>(input.getType())) {
+        return builder.create<bufferization::ToTensorOp>(
+                   loc, type, input, /*restrict=*/true, /*writable=*/true)
+            .getResult();
+      }
+      return Value();
+    });
   }
 };
 
@@ -120,7 +166,7 @@ public:
                         triton::ReduceOp, triton::BitcastOp,
                         triton::ReshapeOp,
                         triton::AddPtrOp, triton::LoadOp,
-                        triton::StoreOp>();
+                        triton::StoreOp, triton::AtomicRMWOp>();
 
     // Dense splat constants must be lowered
     target.addDynamicallyLegalOp<arith::ConstantOp>([](arith::ConstantOp op) {
