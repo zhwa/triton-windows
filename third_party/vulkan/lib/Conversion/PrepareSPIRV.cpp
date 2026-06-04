@@ -28,6 +28,8 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <string>
+
 using namespace mlir;
 
 namespace mlir {
@@ -287,9 +289,9 @@ public:
     }
 
     // 5. Convert memref.alloc to memref.alloca (no address space — default).
-    // Leave the address space as 0 so map-memref-spirv-storage-class
-    // will NOT map it to StorageBuffer. The convert-memref-to-spirv pass
-    // handles alloca with default address space → spirv.Variable(Function).
+    // Note: map-memref-spirv-storage-class WILL map address space 0 to
+    // StorageBuffer, including these allocas. That's why
+    // FixAllocaStorageClassPass must run AFTER map to change them to Function.
     moduleOp.walk([&](memref::AllocOp allocOp) {
       OpBuilder builder(allocOp);
       auto alloca = builder.create<memref::AllocaOp>(
@@ -354,260 +356,6 @@ std::unique_ptr<OperationPass<ModuleOp>> createFixAllocaStorageClassPass() {
   return std::make_unique<FixAllocaStorageClassPass>();
 }
 
-/// Build spirv.module + spirv.func manually, handling remaining memref.alloca
-/// by converting them to spirv.GlobalVariable.
-///
-/// After convert-{memref,arith,cf}-to-spirv, we have:
-///   func.func @kernel(%arg0: memref<?xf32, StorageBuffer>, ...) {
-///     %cast_arg = unrealized_conversion_cast %arg0 → !spirv.ptr<...>
-///     %alloca   = memref.alloca() : memref<256xf32, Workgroup>
-///     %cast_buf = unrealized_conversion_cast %alloca → !spirv.ptr<...>
-///     spirv.Branch / spirv.Load / spirv.Store / spirv.FAdd / ...
-///   }
-///
-/// This pass creates:
-///   spirv.module Logical GLSL450 {
-///     spirv.GlobalVariable @buf : !spirv.ptr<struct<array<256xf32>>, Workgroup>
-///     spirv.func @kernel(%arg0: !spirv.ptr<...>, ...) "None" {
-///       %addr = spirv.mlir.addressof @buf
-///       spirv.Branch / ...  (same body, with casts replaced)
-///     }
-///     spirv.EntryPoint "GLCompute" @kernel
-///   }
-class FinalizeSPIRVPass
-    : public PassWrapper<FinalizeSPIRVPass, OperationPass<ModuleOp>> {
-public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FinalizeSPIRVPass)
-
-  StringRef getArgument() const override { return "finalize-spirv"; }
-  StringRef getDescription() const override {
-    return "Build spirv.module from func.func with SPIR-V ops";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<spirv::SPIRVDialect, memref::MemRefDialect>();
-  }
-
-  void runOnOperation() override {
-    auto moduleOp = getOperation();
-    auto *ctx = &getContext();
-
-    // Find the kernel function
-    func::FuncOp funcOp;
-    moduleOp.walk([&](func::FuncOp f) { funcOp = f; });
-    if (!funcOp) {
-      llvm::errs() << "FinalizeSPIRV: no func.func found, skipping\n";
-      return;
-    }
-
-    llvm::errs() << "FinalizeSPIRV: processing " << funcOp.getName() << "\n";
-
-    OpBuilder builder(ctx);
-    auto loc = funcOp.getLoc();
-
-    // Get target env
-    auto targetEnv = moduleOp->getAttrOfType<spirv::TargetEnvAttr>(
-        spirv::getTargetEnvAttrName());
-
-    // 1. Create spirv.module
-    builder.setInsertionPointToEnd(moduleOp.getBody());
-    auto spvModule = builder.create<spirv::ModuleOp>(
-        loc, spirv::AddressingModel::Logical,
-        spirv::MemoryModel::GLSL450);
-    if (targetEnv)
-      spvModule->setAttr(spirv::getTargetEnvAttrName(), targetEnv);
-
-    builder.setInsertionPointToStart(spvModule.getBody());
-
-    // 2. Collect alloca→cast mappings and create GlobalVariables
-    llvm::DenseMap<Value, spirv::GlobalVariableOp> allocaToGlobal;
-    int varIdx = 0;
-
-    funcOp.walk([&](memref::AllocaOp alloca) {
-      for (auto *user : alloca.getResult().getUsers()) {
-        auto cast = dyn_cast<UnrealizedConversionCastOp>(user);
-        if (!cast)
-          continue;
-
-        auto spirvPtrType =
-            dyn_cast<spirv::PointerType>(cast.getResultTypes()[0]);
-        if (!spirvPtrType)
-          continue;
-
-        // Create GlobalVariable in the spirv.module
-        std::string name = "__buf_" + std::to_string(varIdx++);
-        auto typeAttr = TypeAttr::get(spirvPtrType.getPointeeType());
-        auto nameAttr = builder.getStringAttr(name);
-        auto globalVar = spirv::GlobalVariableOp::create(
-            builder, loc, typeAttr, nameAttr);
-        // The storage class is encoded in the pointer type, but we also
-        // need it as an attribute for proper SPIR-V serialization.
-
-        allocaToGlobal[cast.getResult(0)] = globalVar;
-      }
-    });
-
-    // 3. Determine spirv.func argument types from the unrealized_conversion_casts
-    SmallVector<Type> spirvArgTypes;
-    SmallVector<Value> argCastResults; // cast results for each arg
-    llvm::DenseMap<Value, unsigned> castToArgIdx;
-
-    auto &entryBlock = funcOp.getBody().front();
-    for (auto &op : entryBlock) {
-      auto cast = dyn_cast<UnrealizedConversionCastOp>(&op);
-      if (!cast)
-        continue;
-      // Check if this cast converts a function argument (memref → spirv.ptr)
-      if (cast.getNumOperands() == 1 &&
-          isa<BlockArgument>(cast.getOperand(0))) {
-        auto blockArg = llvm::dyn_cast<BlockArgument>(cast.getOperand(0));
-        if (blockArg && blockArg.getOwner() == &entryBlock) {
-          spirvArgTypes.push_back(cast.getResultTypes()[0]);
-          castToArgIdx[cast.getResult(0)] = spirvArgTypes.size() - 1;
-          argCastResults.push_back(cast.getResult(0));
-        }
-      }
-    }
-
-    // Add remaining scalar args (i32 etc.) that don't have casts
-    for (auto arg : entryBlock.getArguments()) {
-      bool hasCast = false;
-      for (auto *user : arg.getUsers()) {
-        if (auto cast = dyn_cast<UnrealizedConversionCastOp>(user)) {
-          if (castToArgIdx.count(cast.getResult(0)))
-            hasCast = true;
-        }
-      }
-      if (!hasCast) {
-        // This arg is used directly (e.g., i32 scalar)
-        spirvArgTypes.push_back(arg.getType());
-      }
-    }
-
-    // 4. Create spirv.func and MOVE the function body from func.func.
-    // This avoids all cloning/mapping issues — we just take the existing
-    // blocks and transplant them into the spirv.func.
-    auto spvFuncType =
-        FunctionType::get(ctx, spirvArgTypes, /*results=*/{});
-    auto spvFunc = builder.create<spirv::FuncOp>(
-        loc, funcOp.getName(), spvFuncType);
-    spvFunc->setAttr("function_control",
-        spirv::FunctionControlAttr::get(
-            ctx, spirv::FunctionControl::None));
-
-    // Move blocks from func.func into spirv.func (after auto-created entry)
-    auto &funcBody = funcOp.getBody();
-    auto &spvBody = spvFunc.getBody();
-    spvBody.getBlocks().splice(spvBody.end(), funcBody.getBlocks());
-
-    // Now erase the auto-created empty entry block (first block)
-    spvBody.front().erase();
-
-    llvm::errs() << "FinalizeSPIRV: moved body, fixing up types...\n";
-
-    // 5. Fix up the moved body: replace casts and allocas in-place.
-    auto &spvEntry = spvFunc.getBody().front();
-
-    // First, map each old arg to the corresponding new arg by index.
-    // Since we cloneInto, the cloned block args have the old (memref) types.
-    // We need to update them to the spirv.func arg types.
-    // Actually, cloneInto preserves types. The spirv.func was created with
-    // spirvArgTypes, but the cloned entry block has the original memref arg types.
-    // We need to merge: use the cloned blocks but with the correct arg types.
-
-    // Simpler approach: just find and replace unrealized_conversion_cast ops
-    // inside the spirv.func with the appropriate values.
-
-    // Handle arg casts: the cloned casts take cloned block args (memref types)
-    // and produce spirv.ptr types. We want the spirv.func args to BE the
-    // spirv.ptr types, so we need to update the entry block arg types.
-
-    // Replace arg casts: collect first, then process.
-    SmallVector<std::pair<BlockArgument, UnrealizedConversionCastOp>> argCasts;
-    for (auto &op : spvEntry) {
-      auto castOp = dyn_cast<UnrealizedConversionCastOp>(&op);
-      if (!castOp || castOp.getNumOperands() != 1)
-        continue;
-      auto blockArg = llvm::dyn_cast<BlockArgument>(castOp.getOperand(0));
-      if (!blockArg || blockArg.getOwner() != &spvEntry)
-        continue;
-      argCasts.push_back({blockArg, castOp});
-    }
-    for (auto &[blockArg, castOp] : argCasts) {
-      auto spirvType = castOp.getResultTypes()[0];
-      blockArg.setType(spirvType);
-      castOp.getResult(0).replaceAllUsesWith(blockArg);
-      castOp.erase();
-    }
-
-    // Handle alloca casts: replace with spirv.mlir.addressof
-    for (auto &block : spvFunc.getBody()) {
-      for (auto &op : llvm::make_early_inc_range(block)) {
-        auto allocaOp = dyn_cast<memref::AllocaOp>(&op);
-        if (!allocaOp)
-          continue;
-
-        // Find the cast user
-        for (auto *user :
-             llvm::make_early_inc_range(allocaOp.getResult().getUsers())) {
-          auto castOp = dyn_cast<UnrealizedConversionCastOp>(user);
-          if (!castOp)
-            continue;
-
-          auto spirvPtrType =
-              dyn_cast<spirv::PointerType>(castOp.getResultTypes()[0]);
-          if (!spirvPtrType)
-            continue;
-
-          // Create GlobalVariable with correct storage class
-          OpBuilder moduleBuilder(spvModule.getBody(),
-                                  spvModule.getBody()->begin());
-          std::string name = "__buf_" + std::to_string(varIdx++);
-          auto typeAttr = TypeAttr::get(spirvPtrType);
-          auto nameAttr = moduleBuilder.getStringAttr(name);
-          auto globalVar = spirv::GlobalVariableOp::create(
-              moduleBuilder, allocaOp.getLoc(), typeAttr, nameAttr);
-
-          // Create addressof — returns same pointer type as global var
-          OpBuilder funcBuilder(castOp);
-          auto addressOf = funcBuilder.create<spirv::AddressOfOp>(
-              allocaOp.getLoc(), spirvPtrType,
-              SymbolRefAttr::get(ctx, name));
-          castOp.getResult(0).replaceAllUsesWith(addressOf.getResult());
-          if (castOp.use_empty())
-            castOp.erase();
-          else
-            llvm::errs() << "WARNING: cast still has uses after replace! "
-                         << "Cast type: " << castOp.getResultTypes()[0]
-                         << ", AddressOf type: " << addressOf.getType()
-                         << "\n";
-        }
-        if (allocaOp.use_empty())
-          allocaOp.erase();
-      }
-    }
-
-    // Replace func::ReturnOp with spirv::ReturnOp
-    for (auto &block : spvFunc.getBody()) {
-      auto *term = block.getTerminator();
-      if (isa<func::ReturnOp>(term)) {
-        OpBuilder b(term);
-        b.create<spirv::ReturnOp>(term->getLoc());
-        term->erase();
-      }
-    }
-
-    // 6. Add EntryPoint
-    builder.setInsertionPointToEnd(spvModule.getBody());
-    builder.create<spirv::EntryPointOp>(
-        loc, spirv::ExecutionModel::GLCompute,
-        spvFunc, SmallVector<Attribute>());
-
-    // 7. Leave the old func.func in place (body was moved)
-    // funcOp.erase() would crash if it still has attribute uses.
-  }
-};
-
 std::unique_ptr<OperationPass<ModuleOp>> createPrepareSPIRVPass() {
   return std::make_unique<PrepareSPIRVPass>();
 }
@@ -616,8 +364,12 @@ std::unique_ptr<OperationPass<ModuleOp>> createConvertToSPIRVModulePass() {
   return createPrepareSPIRVPass(); // Alias
 }
 
+// FinalizeSPIRV is handled in Python (compiler.py make_spv) via text
+// wrapping + mlir-translate. The C++ approach of building spirv.module
+// manually had verifier issues with block arg type mismatches.
 std::unique_ptr<OperationPass<ModuleOp>> createFinalizeSPIRVPass() {
-  return std::make_unique<FinalizeSPIRVPass>();
+  // No-op — finalization is done in make_spv() Python code.
+  return createPrepareSPIRVPass();
 }
 
 } // namespace vulkan

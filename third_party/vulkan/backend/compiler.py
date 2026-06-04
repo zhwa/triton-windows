@@ -32,7 +32,7 @@ class VulkanBackend(BaseBackend):
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
-        self.binary_ext = "cl"
+        self.binary_ext = "spv"
 
     def hash(self) -> str:
         return f"vulkan-{self.target.arch}-{self.target.warp_size}"
@@ -116,7 +116,11 @@ class VulkanBackend(BaseBackend):
 
     @staticmethod
     def make_opencl(src, metadata, opt):
-        """Emit OpenCL C source from fully-lowered MemRef IR."""
+        """Emit OpenCL C source from fully-lowered MemRef IR.
+
+        Alternative output path — not in the default pipeline but available
+        for debugging or OpenCL-based execution via pyopencl.
+        """
         from triton.backends.vulkan.emitter import emit_opencl
         mlir_text = str(src)
         opencl_src = emit_opencl(mlir_text)
@@ -196,19 +200,8 @@ class VulkanBackend(BaseBackend):
         ir_text = mod.str_nodebug()
 
         # The IR has spirv.func inside builtin.module. We need it inside
-        # spirv.module for serialization. Extract the spirv.func content
-        # and wrap it in spirv.module.
+        # spirv.module for serialization. Extract via brace-matching.
         import re as _re
-        func_match = _re.search(
-            r'(spirv\.func @\w+\(.*)', ir_text, _re.DOTALL)
-        if not func_match:
-            raise RuntimeError("No spirv.func found in IR")
-
-        func_body = func_match.group(1).rstrip().rstrip("}")
-        # Remove trailing module close
-        while func_body.endswith("}"):
-            func_body = func_body[:-1].rstrip()
-        func_body += "\n  }"
 
         # Find any spirv.GlobalVariable ops
         globals_text = ""

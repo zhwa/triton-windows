@@ -58,6 +58,7 @@ PIPELINES = {
     "full": [
         "--convert-linalg-to-loops",
         "--convert-scf-to-cf",
+        "--map-memref-spirv-storage-class",
         "--convert-memref-to-spirv",
         "--convert-cf-to-spirv",
         "--convert-math-to-spirv",

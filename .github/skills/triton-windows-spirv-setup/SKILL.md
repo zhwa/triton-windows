@@ -119,7 +119,9 @@ static bool isAllocationSupported(Operation *allocOp, MemRefType type) {
 
 **Fix:** `FixAllocaStorageClassPass` runs AFTER `map-memref-spirv-storage-class`
 and BEFORE `convert-memref-to-spirv`. It changes alloca storage class from
-`StorageBuffer` to `Function`:
+`StorageBuffer` to `Function`. Note: `PrepareSPIRV` creates allocas with
+default address space (0), which `map-memref-spirv-storage-class` WILL map
+to `StorageBuffer` — that is expected. `FixAllocaStorageClassPass` corrects it:
 ```cpp
 auto funcAttr = spirv::StorageClassAttr::get(ctx, spirv::StorageClass::Function);
 auto newType = MemRefType::get(oldType.getShape(), oldType.getElementType(),
@@ -281,7 +283,7 @@ These are specific to the LLVM commit used by Triton 3.7.0:
 | `arith::ConstantOp` | Requires `TypedAttr`: `cast<TypedAttr>(builder.getZeroAttr(elemType))` |
 | `FunctionInterfaces.h` | Path is `mlir/Interfaces/FunctionInterfaces.h` (NOT `mlir/IR/`) |
 | `populateElementwiseToLinalgConversionPatterns` | In `mlir/Dialect/Linalg/Transforms/Transforms.h` |
-| `ResourceLimitsAttr::get` | 4th arg is `ArrayAttr` (use `Builder.getI32ArrayAttr`) |
+| `ResourceLimitsAttr::get` | 4th arg type varies: use `Builder(ctx).getI32ArrayAttr(...)` which returns the correct type for each LLVM version |
 | `createSCFToControlFlowPass` | NOT `createConvertSCFToCFPass` |
 | `spirv::ModuleOp::getBody()` | Returns `Block*` (NOT `Region&`) |
 
