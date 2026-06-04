@@ -127,6 +127,34 @@ class VulkanBackend(BaseBackend):
         return opencl_src
 
     @staticmethod
+    def make_memref_bufonly(mod, metadata, opt):
+        """Bufferize only — keep linalg.generic for parallel emission."""
+        try:
+            from triton._C.libtriton import vulkan
+        except ImportError:
+            raise RuntimeError("Vulkan backend C++ passes not available.")
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        vulkan.passes.memref.one_shot_bufferize(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
+        pm.run(mod, 'make_memref_bufonly')
+        return mod
+
+    @staticmethod
+    def make_opencl_parallel(src, metadata, opt):
+        """Emit parallel OpenCL C from bufferized IR with linalg.generic ops.
+
+        Each workitem processes one element using get_global_id(0).
+        Returns OpenCL C source. Sets metadata['block_size'] for dispatch.
+        """
+        from triton.backends.vulkan.emitter_parallel import emit_opencl_parallel
+        mlir_text = src.str_nodebug()
+        opencl_src, block_size = emit_opencl_parallel(mlir_text)
+        metadata['block_size'] = block_size
+        return opencl_src
+
+    @staticmethod
     def make_spirv(mod, metadata, opt):
         """Convert MemRef IR → SPIR-V dialect via MLIR conversion passes."""
         try:
