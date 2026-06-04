@@ -56,6 +56,31 @@ def run_kernel(src, metadata, args, global_size=(1,), local_size=(1,)):
     queue.finish()
 
 
+def run_kernel_multiblock(src, metadata, base_args, n_blocks):
+    """Run a kernel with multiple blocks by dispatching n_blocks times.
+
+    base_args should include the kernel's own args but NOT the 6 program info
+    args. This function appends num_programs(x,y,z) + program_id(x,y,z) for
+    each block, with program_id_x = block_id.
+    """
+    prog = cl.Program(ctx, src).build()
+    kernel = getattr(prog, metadata["name"])
+    n_base = len(base_args)
+    for bid in range(n_blocks):
+        for i, arg in enumerate(base_args):
+            kernel.set_arg(i, arg)
+        # num_programs: (n_blocks, 1, 1)
+        kernel.set_arg(n_base + 0, np.int32(n_blocks))
+        kernel.set_arg(n_base + 1, np.int32(1))
+        kernel.set_arg(n_base + 2, np.int32(1))
+        # program_id: (bid, 0, 0)
+        kernel.set_arg(n_base + 3, np.int32(bid))
+        kernel.set_arg(n_base + 4, np.int32(0))
+        kernel.set_arg(n_base + 5, np.int32(0))
+        cl.enqueue_nd_range_kernel(queue, kernel, (1,), (1,))
+    queue.finish()
+
+
 def read_buf(buf, shape, dtype=np.float32):
     """Read an OpenCL buffer back to numpy."""
     out = np.empty(shape, dtype=dtype)
@@ -209,6 +234,38 @@ def test_transpose():
     return np.max(np.abs(o - expected))
 
 
+def test_vector_add_multiblock():
+    """Multi-block test: 1024 elements = 4 blocks of BLOCK_SIZE=256."""
+    total = 1024
+    n_blocks = total // 256
+    src, md = compile_ttir(os.path.join(TEST_DIR, "test_vector_add.ttir"))
+    x = np.random.randn(total).astype(np.float32)
+    y = np.random.randn(total).astype(np.float32)
+    xb = cl.Buffer(ctx, RO, hostbuf=x)
+    yb = cl.Buffer(ctx, RO, hostbuf=y)
+    ob = cl.Buffer(ctx, WO, total * 4)
+    base_args = [xb, yb, ob, np.int32(total)]
+    run_kernel_multiblock(src, md, base_args, n_blocks)
+    o = read_buf(ob, total)
+    return np.max(np.abs(o - (x + y)))
+
+
+def test_broadcast_add_2d():
+    """True 2D broadcast: x[4,8] + bias[8] → out[4,8]."""
+    M, N = 4, 8
+    src, md = compile_ttir(os.path.join(TEST_DIR, "test_broadcast_add_2d.ttir"))
+    x = np.random.randn(M * N).astype(np.float32)
+    bias = np.random.randn(N).astype(np.float32)
+    xb = cl.Buffer(ctx, RO, hostbuf=x)
+    bb = cl.Buffer(ctx, RO, hostbuf=bias)
+    ob = cl.Buffer(ctx, WO, M * N * 4)
+    args = [xb, bb, ob, np.int32(M), np.int32(N)] + [np.int32(0)] * 6
+    run_kernel(src, md, args)
+    o = read_buf(ob, M * N)
+    expected = x.reshape(M, N) + bias
+    return np.max(np.abs(o.reshape(M, N) - expected))
+
+
 def test_atomic_add():
     src, md = compile_ttir(os.path.join(TEST_DIR, "test_atomic_add.ttir"))
     x = np.random.randn(N).astype(np.float32)
@@ -242,6 +299,8 @@ TESTS = [
     ("broadcast_add",    test_broadcast_add,     1e-6),
     ("transpose_16x16",  test_transpose,         1e-6),
     ("atomic_add",       test_atomic_add,        1e-3),
+    ("vector_add_4blk",  test_vector_add_multiblock, 1e-6),
+    ("broadcast_2d",     test_broadcast_add_2d,  1e-5),
 ]
 
 

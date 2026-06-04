@@ -806,8 +806,24 @@ static void visitOperand(Value operand, PtrState &state, Location loc,
           state.source = src;
 
         auto resultType = cast<RankedTensorType>(splatOp.getType());
+        auto elemType = resultType.getElementType();
+        bool isIntSplat = elemType.isInteger(32) || elemType.isInteger(64) ||
+                          elemType.isIndex();
+
         for (auto dim : resultType.getShape()) {
-          state.offsets.push_back(builder.getIndexAttr(0));
+          // If splatting an integer scalar (offset), use it as the base offset
+          // so that pid-dependent offsets propagate through addState
+          if (isIntSplat && srcState.scalar) {
+            Value idxVal = builder.create<arith::IndexCastOp>(
+                loc, builder.getIndexType(), srcState.scalar);
+            state.offsets.push_back(idxVal);
+          } else if (isIntSplat && !srcState.isEmpty() && srcState.getRank() == 0
+                     && !isa<triton::PointerType>(src.getType())) {
+            // Non-pointer scalar source — try to get a dynamic offset
+            state.offsets.push_back(builder.getIndexAttr(0));
+          } else {
+            state.offsets.push_back(builder.getIndexAttr(0));
+          }
           state.sizes.push_back(builder.getIndexAttr(dim));
           state.strides.push_back(builder.getIndexAttr(0));
         }
@@ -847,8 +863,33 @@ static void visitOperand(Value operand, PtrState &state, Location loc,
           state.scalar =
               builder.create<arith::AddIOp>(loc, lhs.scalar, rhs.scalar);
         } else {
-          // One scalar, one tensor
-          state = lhs.getRank() > 0 ? lhs : rhs;
+          // One scalar, one tensor — add scalar as base offset to tensor state
+          auto &tensorState = lhs.getRank() > 0 ? lhs : rhs;
+          auto &scalarState = lhs.getRank() > 0 ? rhs : lhs;
+          state = tensorState;
+          if (scalarState.scalar) {
+            // Convert scalar i32 to index and add to the tensor's first offset
+            Value scalarIdx = builder.create<arith::IndexCastOp>(
+                loc, builder.getIndexType(), scalarState.scalar);
+            if (!state.offsets.empty()) {
+              auto existingOff = state.offsets[0];
+              auto oConst = dyn_cast_if_present<Attribute>(existingOff);
+              if (oConst) {
+                Value ov = builder.create<arith::ConstantIndexOp>(
+                    loc, cast<IntegerAttr>(oConst).getInt());
+                state.offsets[0] =
+                    builder.create<arith::AddIOp>(loc, ov, scalarIdx)
+                        .getResult();
+              } else {
+                state.offsets[0] =
+                    builder.create<arith::AddIOp>(loc, cast<Value>(existingOff),
+                                                  scalarIdx)
+                        .getResult();
+              }
+            } else {
+              state.offsets.push_back(scalarIdx);
+            }
+          }
         }
       })
       .Case<arith::MulIOp>([&](auto mulOp) {

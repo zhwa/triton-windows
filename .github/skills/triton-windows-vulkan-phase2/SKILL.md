@@ -13,9 +13,10 @@ during Phase 2 implementation. Phase 1 is covered by `triton-windows-spirv-setup
 
 ## Quick Status
 
-**12/12 GPU-verified kernels on RTX 2080 Ti via pyopencl:**
+**14/14 GPU-verified kernels on RTX 2080 Ti via pyopencl:**
 vector_add, elementwise_mul, fma, gelu, swiglu, reduce_sum, reduce_max,
-softmax, matmul_16x16, broadcast_add, transpose_16x16, atomic_add
+softmax, matmul_16x16, broadcast_add, transpose_16x16, atomic_add,
+vector_add_4blk (multi-block), broadcast_2d (expand_dims+broadcast)
 
 **Pipeline:** TTIR → make_ttir → make_linalg → make_memref → make_opencl → GPU
 
@@ -159,10 +160,24 @@ The most complex converter. Triton IR builds pointer tensors via chains like:
 
 Then creates: `memref.reinterpret_cast %base offset:[off] sizes:[N] strides:[1]`
 
-**LIMITATION:** Only handles 1D pointer patterns. 2D patterns like
-`tt.expand_dims + tt.broadcast + tt.addptr` crash in `visitOperand` because
-it doesn't track multi-dimensional offsets/strides. The workaround for 2D
-kernels (matmul, transpose) is to use `tt.reshape` on flat 1D loads instead.
+**Dynamic offsets (pid-dependent):** When the offset chain involves
+`tt.get_program_id` (e.g., `pid * BLOCK_SIZE + range`), the offset must be
+dynamic. The key is `visitOperand.SplatOp`: when splatting an integer scalar
+(not a pointer), the scalar value is propagated as a dynamic offset via
+`arith.index_cast`. This enables multi-block execution where each block
+accesses a different slice of the buffer.
+
+**TRAP:** Before this fix, `SplatOp` for integer scalars set `offsets=[0]`
+(discarding the runtime value), causing all blocks to read from offset 0.
+The fix checks `isIntSplat && srcState.scalar` and uses the scalar as the
+base offset. This also enables 2D pointer patterns with `expand_dims +
+broadcast + addptr`.
+
+**2D pointer patterns:** `visitOperand` handles `ExpandDimsOp` (inserts a
+size-1 dimension with stride 0) and `BroadcastOp` (updates sizes to match
+broadcast shape). With the SplatOp dynamic offset fix, chains like
+`splat(N) → broadcast → muli(rows, N) → addi(cols)` produce correct
+multi-dimensional reinterpret_cast ops.
 
 ### PATTERN 2: Scalar Load/Store with Unranked MemRef
 
@@ -395,10 +410,45 @@ reads `mod.context` as a Python attribute. Without it, you get
 Every kernel gets 6 extra i32 args appended by `addProgramInfo()`:
 `num_programs_x, num_programs_y, num_programs_z, program_id_x, program_id_y, program_id_z`
 
-The test harness passes these as zeros (single-block execution):
+For single-block execution:
 ```python
 args = [buf_a, buf_b, buf_out, np.int32(N)] + [np.int32(0)] * 6
 ```
+
+For multi-block execution, use `run_kernel_multiblock()`:
+```python
+def run_kernel_multiblock(src, metadata, base_args, n_blocks):
+    prog = cl.Program(ctx, src).build()
+    kernel = getattr(prog, metadata["name"])
+    for bid in range(n_blocks):
+        for i, arg in enumerate(base_args):
+            kernel.set_arg(i, arg)
+        n = len(base_args)
+        kernel.set_arg(n + 0, np.int32(n_blocks))  # num_programs_x
+        kernel.set_arg(n + 1, np.int32(1))          # num_programs_y
+        kernel.set_arg(n + 2, np.int32(1))          # num_programs_z
+        kernel.set_arg(n + 3, np.int32(bid))        # program_id_x
+        kernel.set_arg(n + 4, np.int32(0))          # program_id_y
+        kernel.set_arg(n + 5, np.int32(0))          # program_id_z
+        cl.enqueue_nd_range_kernel(queue, kernel, (1,), (1,))
+    queue.finish()
+```
+
+### Performance Baseline
+
+Measured on RTX 2080 Ti (Route B via Linalg, single-threaded OpenCL):
+
+| Kernel | N | OpenCL µs | CUDA µs | Ratio | Notes |
+|--------|---|-----------|---------|-------|-------|
+| vector_add | 65536 | 47,234 | 19 | 2539× | 256 sequential blocks |
+| reduce_sum | 256 | 277 | 26 | 10.6× | Single block, serial loop |
+| softmax | 256 | 221 | 18 | 12.1× | Single block, 2 reductions |
+| matmul_16×16 | 16 | 345 | 37 | 9.4× | Triple nested loop |
+
+The 2539× gap for vector_add is expected: we dispatch 256 single-threaded
+blocks sequentially. Single-block kernels are 10-12×: serial execution vs
+CUDA's parallel threads. Route A (TTG→SPIR-V) would use Vulkan compute
+workgroups to close this gap.
 
 ### Error Tolerances
 
@@ -415,24 +465,11 @@ args = [buf_a, buf_b, buf_out, np.int32(N)] + [np.int32(0)] * 6
 
 ## Known Limitations
 
-### 1. No 2D Pointer Patterns
+### 1. No Loop-Carried Pointer State
 
-Real Triton-generated TTIR for 2D indexing looks like:
-```mlir
-%row = tt.expand_dims %offs_m {axis = 1}  // tensor<M> → tensor<Mx1>
-%rows = tt.broadcast %row                  // tensor<Mx1> → tensor<MxN>
-%ptrs = tt.addptr %base, %rows             // 2D pointer tensor
-```
-
-`visitOperand` in `AddPtrConverter` doesn't handle multi-dim expand+broadcast
-chains. It only tracks 1D offset/size/stride. Attempting 2D patterns crashes
-with an assertion in `visitOperand`.
-
-**Workaround:** Use flat 1D addressing + `tt.reshape`:
-```mlir
-%flat = tt.load %flat_ptrs : tensor<256x!tt.ptr<f32>>  // load as 1D
-%matrix = tt.reshape %flat : tensor<256xf32> -> tensor<16x16xf32>
-```
+`scf.for` loops that update pointer state across iterations (e.g., tiled
+matmul with pointer increment per tile) are not supported. `visitOperand`
+only traces static def-chains, not loop-carried values.
 
 ### 2. AtomicRMW Requires TypeConverter + Materializations
 
@@ -444,10 +481,11 @@ The `TritonTypeConverter` needs `tensor↔memref` materializations
 (`bufferization::ToBufferOp` and `bufferization::ToTensorOp`) to bridge
 the type gap when non-atomic ops produce tensors consumed by the atomic.
 
-### 3. Single-Block Testing Only
+### 3. Sequential Block Dispatch
 
-All tests run with `program_id = 0` and `global_size = (1,)`. Multi-block
-execution would require setting proper `num_programs` and `global_size`.
+Multi-block kernels are dispatched via host-side loop (one OpenCL enqueue per
+block). This is ~2500× slower than CUDA for large N. Route A (Phase 3) would
+use Vulkan compute workgroups for parallel dispatch.
 
 ### 4. Masked Operations Coverage
 
@@ -516,7 +554,8 @@ Common OpenCL compilation errors:
 ## Adding a New Kernel (Step-by-Step)
 
 1. **Write TTIR:** Create `third_party/vulkan/test/test_foo.ttir` using existing
-   tests as templates. Use 1D flat addressing to avoid the 2D pointer limitation.
+   tests as templates. Both 1D flat addressing and 2D pointer patterns
+   (expand_dims + broadcast + addptr) are supported.
 
 2. **Test conversion:** Run through `triton-opt --triton-to-linalg test_foo.ttir`.
    If it fails, check if you need a new converter or if an existing op isn't
@@ -535,7 +574,7 @@ Common OpenCL compilation errors:
 5. **Add GPU test:** Add `test_foo()` function in `test_kernels.py` following
    the pattern of existing tests. Add to the `TESTS` list at the bottom.
 
-6. **Run test suite:** `python test_kernels.py` — all tests should pass (currently 12).
+6. **Run test suite:** `python test_kernels.py` — all tests should pass (currently 14).
 
 ---
 
@@ -611,3 +650,16 @@ Common OpenCL compilation errors:
    `third_party/vulkan/backend/` but Python imports from
    `python/triton/backends/vulkan/`. Forgetting to copy causes stale behavior
    with no error message.
+
+9. **`visitOperand.SplatOp` must propagate integer scalar values.** When
+   `tt.splat` broadcasts a runtime integer (e.g., `pid * BLOCK_SIZE`), the
+   scalar value must become the dynamic offset in PtrState — NOT zero. Without
+   this, multi-block kernels silently read from offset 0 for all blocks, and
+   2D pointer patterns (expand_dims + broadcast) lose their row/column offsets.
+   This was the single most impactful bug fix in Phase 2.
+
+10. **Use `--debug` to verify pattern dispatch.** When a converter appears to
+    not work, the `--debug` flag shows exactly which patterns are tried. The
+    AtomicRMW "not dispatched" claim turned out to be wrong — the pattern WAS
+    dispatched but crashed because `adaptor.getVal()` returned `memref` (not
+    `tensor`) due to TypeConverter registration. Always verify with evidence.
