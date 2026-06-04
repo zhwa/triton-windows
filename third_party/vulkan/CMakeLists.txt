@@ -11,6 +11,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_library(VulkanTritonToLinalg STATIC
   lib/Conversion/TritonToLinalg.cpp
   lib/Conversion/TritonToLinalgPass.cpp
+  lib/Conversion/PrepareSPIRV.cpp
 )
 
 target_include_directories(VulkanTritonToLinalg PUBLIC
@@ -23,19 +24,44 @@ target_link_libraries(VulkanTritonToLinalg PUBLIC
   MLIRAffineDialect
   MLIRArithDialect
   MLIRBufferizationDialect
+  MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRLinalgDialect
   MLIRLinalgTransforms
   MLIRMathDialect
   MLIRMemRefDialect
   MLIRSCFDialect
+  MLIRSPIRVDialect
+  MLIRSPIRVConversion
+  MLIRSPIRVTransforms
   MLIRTensorDialect
-  MLIRAffineDialect
   MLIRPass
   MLIRTransforms
   MLIRSupport
   MLIRDialectUtils
+  MLIRArithToSPIRV
+  MLIRControlFlowToSPIRV
+  MLIRFuncToSPIRV
+  MLIRMemRefToSPIRV
 )
 
 set_property(GLOBAL APPEND PROPERTY TRITON_LIBS VulkanTritonToLinalg)
 
+# pybind11 module — exposes passes to Python as `vulkan.passes.linalg.*`
+add_triton_plugin(TritonVulkan
+  ${CMAKE_CURRENT_SOURCE_DIR}/triton_vulkan.cc
+  LINK_LIBS
+  VulkanTritonToLinalg
+  MLIRBufferizationTransforms
+  MLIRArithTransforms
+  MLIRLinalgTransforms
+  MLIRTensorTransforms
+  MLIRSCFTransforms
+  MLIRMemRefTransforms
+  MLIRAffineToStandard
+  MLIRSCFToControlFlow
+  MLIRSPIRVSerialization
+  MLIRSPIRVDialect
+  MLIRSPIRVTransforms
+)
+target_link_libraries(TritonVulkan PRIVATE Python3::Module pybind11::headers)

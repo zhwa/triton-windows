@@ -23,8 +23,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Script is at third_party/vulkan/tools/vulkan-opt.py → root is 3 levels up
 TRITON_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 LLVM_BIN = os.path.join(TRITON_ROOT, "build", "llvm-project", "build", "bin")
-MLIR_OPT = os.path.join(LLVM_BIN, "mlir-opt.exe")
-MLIR_TRANSLATE = os.path.join(LLVM_BIN, "mlir-translate.exe")
+_EXE = ".exe" if sys.platform == "win32" else ""
+MLIR_OPT = os.path.join(LLVM_BIN, f"mlir-opt{_EXE}")
+MLIR_TRANSLATE = os.path.join(LLVM_BIN, f"mlir-translate{_EXE}")
 
 # Pre-defined conversion pipelines
 PIPELINES = {
