@@ -2,7 +2,7 @@
 
 **Purpose:** A thorough analysis of Intel's SPIR-V backend implementation,
 examined as a reference for building a real SPIR-V backend for triton-windows
-(beyond the current toy Phase 3 parallel emitter).
+(beyond the current Linalg→SPIR-V pipeline).
 
 **Audience:** Compiler engineers working on the Vulkan/SPIR-V backend who
 want to understand what a production-grade SPIR-V backend looks like, what
@@ -611,7 +611,7 @@ This works because:
 - MLIR's SPIR-V dialect lacks some ops needed for GPU compute
 - The LLVM path inherits all of LLVM's optimization passes
 
-**For our backend:** This is the recommended approach. Our current Phase 1.5
+**For our backend:** This is the recommended approach. Our current
 `PrepareSPIRV.cpp` tries to use MLIR's SPIR-V conversion passes, which is
 fragile and incomplete. The LLVM path would be more robust.
 
@@ -762,143 +762,189 @@ compute semantics.
 
 ---
 
-## 12. Three Viable Paths Forward
+## 12. Updated Feasibility Assessment (June 2025)
 
-After studying Intel's implementation and reviewing MLIR's SPIR-V
-documentation, we identify three viable paths:
+### Status Update
 
-| Path | Pipeline | Reference | Effort | Performance Ceiling |
-|------|----------|-----------|--------|-------------------|
-| **A** | TTGIR → LLVM-IR → llvm-spirv → Vulkan SPIR-V | Intel XPU | ~15K lines, 2-3 months | ~80-95% of CUDA |
-| **B** | TTIR → Linalg → memref → OpenCL C text | Our Phases 0-3 | Done | ~0.04-10% of CUDA |
-| **C** | TTIR → Linalg → memref → MLIR SPIR-V dialect → Vulkan SPIR-V | IREE / our Phase 1.5 | ~5K lines, 4-6 weeks | ~5-20% of CUDA |
+Since the original study, significant progress has been made:
+- **Path C is complete.** VulkanizePass, push constants, VulkanCompute
+  runtime all working. 9/9 kernels dispatching via native Vulkan SPIR-V.
+- **Path B is complete.** Serial (14 tests) + parallel (10 tests) OpenCL
+  emitters working. Useful for debugging but not production.
+- The question now is: **should we pursue Path A (TTGIR→LLVM→SPIR-V)?**
 
-### Path A: LLVM-IR Route (Intel's Approach)
+### Deep Analysis: Why Intel's Approach Doesn't Transfer
 
-Fork the upstream `TritonNvidiaGPUToLLVM` conversion to target SPIR-V
-instead of NVPTX:
+The original §12 recommended "Path A as the next upgrade." After a deeper
+study of the actual intrinsic dependencies, **this recommendation is revised.**
 
-1. Replace PTX intrinsics with SPIR-V built-ins
-   (`threadIdx.x` → `gl_LocalInvocationID.x`)
-2. Replace `nvvm.barrier0` with `spirv.ControlBarrier`
-3. Replace `nvvm.shfl.sync` with `spirv.GroupNonUniform*`
-4. Replace NVPTX address spaces with Vulkan/SPIR-V address spaces
-5. Add Vulkan descriptor set decorations for buffer arguments
-6. Use `llvm-spirv` translator for final serialization
+#### Intel's Code Is 80% Intel-Specific
 
-**Advantage:** Full Triton GPU scheduling (coalescing, pipelining,
-prefetch). Production-quality performance.
-**Challenge:** Requires deep expertise in both TritonGPU IR and
-Vulkan SPIR-V. The NVPTX-specific code is deeply intertwined with
-layout-aware codegen. ~15K lines of new/modified C++.
+| Component | Lines | Intel-Specific? |
+|-----------|-------|-----------------|
+| `TritonIntelGPUToLLVM/` | 7,318 | ~80% (DPAS, 2D block load, Xe asm, SPV_INTEL_*) |
+| `TritonNVIDIAGPUToLLVM/` | 7,050 | ~85% (PTX inline asm, NVVM intrinsics) |
+| Generic `TritonGPUToLLVM/` | 9,081 | ~55-60% generic, 40-45% vendor stubs |
 
-### Path B: OpenCL Text Emitter (What We Built)
+Intel's path cannot be "followed." Their code assumes Intel hardware
+intrinsics that don't exist on NVIDIA: DPAS matrix engines, 2D block
+load/store, Xe assembly format, SPV_INTEL_* extensions.
 
-Our Phase 0-3 implementation:
-- Phase 2 (serial): TTIR → Linalg → memref → scf.for → cf.br → OpenCL C
-- Phase 3 (parallel): TTIR → Linalg → bufferize-only → OpenCL C (1 workitem/element)
+#### NVIDIA's Code Is Equally Vendor-Locked
 
-**Advantage:** Done, working, 14+10 tests passing.
-**Limitation:** Regex-based emitter, no GPU scheduling, text output.
-Useful for learning and prototyping but not production.
+Forking NVIDIA's `TritonNVIDIAGPUToLLVM` (the actual Path A proposal)
+requires replacing **every PTX intrinsic** with a SPIR-V equivalent:
 
-### Path C: MLIR SPIR-V Dialect Route (Finish What We Started)
+| NVIDIA Intrinsic Category | Count | SPIR-V Equivalent | On Turing (RTX 2080 Ti)? |
+|--------------------------|-------|-------------------|--------------------------|
+| Thread/block IDs | ~10 | `gl_LocalInvocationID`, `gl_WorkGroupID` | ✅ Yes |
+| Basic barriers (`bar.sync`) | ~5 | `OpControlBarrier` | ✅ Yes |
+| Shared memory load/store | ~20 | `Workgroup` storage class | ✅ Yes |
+| Atomics (`atom.*`) | ~10 | `OpAtomic*` | ✅ Yes |
+| Warp shuffle (`shfl.sync`) | ~8 | `OpGroupNonUniformShuffle` | ✅ Yes (subgroup) |
+| Warp vote | ~3 | `OpGroupNonUniformAll/Any` | ✅ Yes |
+| Tensor cores (`mma.sync`) | ~15 | `VK_KHR_cooperative_matrix` | ✅ Yes (Turing supports it) |
+| Async copy (`cp.async`) | ~10 | ❌ None | ❌ N/A (Ampere+ only anyway) |
+| TMA (`cp.async.bulk.tensor`) | ~15 | ❌ None | ❌ N/A (Hopper+ only) |
+| Async barriers (`mbarrier.*`) | ~10 | ❌ None | ❌ N/A (Ampere+ only) |
+| Cache control (evict, L2 hint) | ~8 | ❌ None | ❌ Vulkan doesn't expose |
+| PTX inline asm (misc) | ~50+ | Must be rewritten case-by-case | ⚠️ Partial |
 
-This is the insight from the MLIR SPIR-V documentation study: **MLIR's
-SPIR-V dialect is fine as a serialization target**, but the upstream
-conversion bridges (`convert-memref-to-spirv`, `convert-func-to-spirv`)
-assume clean, structured MLIR — not Triton's pointer-heavy IR with
-`reinterpret_cast`, unranked memrefs, and implicit address spaces.
+**The problem is deeper than intrinsic replacement.** The entire code
+generation strategy in `TritonNVIDIAGPUToLLVM` is designed around PTX:
+- **Layout encodings** (blocked, MMA, shared) assume warp/SM topology
+- **Memory coalescing** algorithms assume warp-level access patterns
+- **Software pipelining** uses `cp.async` (no SPIR-V equivalent)
+- **Warp specialization** is deeply NVIDIA-specific
+- **Register allocation hints** (`.reg`, `.pred`) are PTX-specific
 
-Our `PrepareSPIRV.cpp` already has the right bridge passes:
-- `ExpandReinterpretCast` — flatten `reinterpret_cast` to base+offset
-- `ExpandMemRefCopy` — expand `memref.copy` to explicit load/store loops
-- `RemoveDealloc` — remove `memref.dealloc` (SPIR-V handles lifetime)
-- `FixAllocaStorageClassPass` — fix alloca to use `Function` storage class
-- Target environment attachment for Vulkan capabilities
+You can't find-and-replace intrinsics. You'd be rewriting the code
+generation strategy for ~7,000 lines of C++.
 
-**Current gaps (what "the last 20%" needs):**
+#### LLVM→SPIR-V Translation Has Its Own Costs
 
-1. **Unranked memref elimination not complete.** The function signature
-   rewriting (`unranked memref → ranked 1D dynamic`) works, but
-   `memref.cast` ops from unranked→ranked still linger. The
-   `LowerUnrankedCast` pattern returns `failure()` unconditionally — it's
-   a placeholder.
+Even if you got clean LLVM-IR, translating to Vulkan SPIR-V requires:
 
-2. **`spirv.module` wrapper generation.** `convert-func-to-spirv` converts
-   individual functions but doesn't wrap them in a `spirv.module` with
-   the right addressing model, memory model, and entry point. The current
-   `make_spv` does this via text manipulation — fragile.
+1. **SPIRV-LLVM-Translator** — external dependency, Intel patches it
+   with custom patches (`3122.patch`, `revert_3609.patch`)
+2. The translator emits **OpenCL-flavored SPIR-V** by default — getting
+   Vulkan-flavored SPIR-V needs the LLVM SPIR-V backend with Vulkan triple
+3. Our LLVM build **doesn't include the SPIR-V backend target** — we'd
+   need to add `SPIRV` to `LLVM_TARGETS_TO_BUILD`
+4. The LLVM SPIR-V backend is conditional on `LLVM_SPIRV_BACKEND_TARGET_PRESENT`
+   — another build configuration to manage
 
-3. **Vulkan-specific decorations missing.** Buffer arguments need
-   `OpDecorate DescriptorSet 0` / `OpDecorate Binding N` annotations.
-   Push constants need `PushConstant` storage class. These aren't handled
-   by the generic MLIR conversion passes.
+#### The Generic TritonGPU→LLVM Can't Stand Alone
 
-4. **`scf.for` from copy expansion.** The `ExpandMemRefCopy` creates
-   `scf.for` loops, but `convert-scf-to-cf` runs before SPIR-V conversion.
-   A second SCF→CF pass is needed (noted in comments but not implemented).
+The 9,081-line generic `TritonGPUToLLVM` code is ~55-60% generic but
+**requires a vendor backend** to fill the remaining 40-45%:
+- `TargetInfo` interface: thread/block IDs, barrier, shuffle, printf
+- Vendor-specific allocation: shared memory sizing, register pressure
+- Layout-to-hardware mapping: which encoding uses which instructions
 
-5. **Compute shader entry point.** Vulkan SPIR-V needs `OpEntryPoint
-   GLCompute`, `OpExecutionMode LocalSize`, and `OpDecorate BuiltIn
-   GlobalInvocationId`. These are absent.
+Creating a "generic SPIR-V TargetInfo" is possible but amounts to
+writing a new vendor backend (~3-5K lines of C++).
 
-**Estimated effort to complete:** ~3-5K lines of C++ (bridge passes +
-entry point generation + descriptor set decoration) + ~500 lines Python
-(pipeline integration). 4-6 weeks.
+#### triton-shared Is Not an Alternative
 
-### Recommended Strategy: Path C as Stepping Stone to Path A
+Microsoft's triton-shared (TTIR→Linalg converter with 35+ converters)
+is **no longer maintained** (README states this explicitly). Last commit
+December 2025. No SPIR-V output path. Not viable as a foundation.
 
-**Phase 3.5 — Complete Path C (4-6 weeks):**
+### Revised Path Assessment
 
-1. Fix `LowerUnrankedCast` to actually eliminate unranked memrefs
-2. Add a `GenerateVulkanEntryPoint` pass:
-   - Wrap kernel function in `spirv.module` with Logical/Vulkan addressing
-   - Add `spirv.EntryPoint` + `spirv.ExecutionMode` for GLCompute
-   - Add `spirv.globalVariable` for buffer args (StorageBuffer class)
-   - Add `spirv.globalVariable` for `gl_GlobalInvocationID` (Input class)
-3. Add a `DecorateDescriptorSets` pass:
-   - Each buffer arg → DescriptorSet=0, Binding=N
-   - Scalar args → PushConstant block
-4. Ensure all `scf` is lowered before SPIR-V conversion
-5. Test with Vulkan compute dispatch (via `vulkano`, `wgpu`, or raw Vulkan C)
+| Path | Pipeline | Effort | Perf Ceiling | Risk | Recommended? |
+|------|----------|--------|-------------|------|-------------|
+| **A** | TTGIR → LLVM → SPIR-V (fork NVIDIA) | ~10-15K lines, 3-6 months | 50-80% CUDA | **Very High** | ❌ Not now |
+| **A-lite** | Same but SM 7.x only, no TMA/async | ~8K lines, 2-3 months | 30-50% CUDA | High | ❌ Poor ROI |
+| **B** | TTIR → Linalg → OpenCL C text | Done | 0.04-10% CUDA | None | ✅ Done (debug tool) |
+| **C** | TTIR → Linalg → MLIR SPIR-V → Vulkan | Done (9/9 kernels) | 5-20% CUDA | None | ✅ Done |
+| **C+** | Path C + incremental GPU features | ~2-4K lines, 4-8 weeks | **20-40% CUDA** | **Low** | ✅ **Recommended** |
 
-**Phase 4 — Vulkan Compute Runtime (3-4 weeks):**
+### Path C+ Details (Recommended Next Step)
 
-1. Vulkan instance/device creation
-2. Compute pipeline from SPIR-V binary
-3. Descriptor set management + push constants
-4. `vkCmdDispatch` wrapper
-5. Python bindings via pybind11
+Enhance the current working MLIR SPIR-V pipeline with GPU compute
+features. No TTGIR, no LLVM-IR, no vendor-specific code. Just standard
+MLIR passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
 
-**Phase 5 — Upgrade to Path A for Performance (2-3 months):**
+**Confirmed: RTX 2080 Ti (Turing) supports these Vulkan extensions:**
+- `VK_KHR_cooperative_matrix` (tensor cores via Vulkan!)
+- `VK_KHR_shader_subgroup_*` (warp-level ops via subgroup)
+- `VK_KHR_shader_float16_int8`
+- `VK_KHR_16bit_storage`, `VK_KHR_8bit_storage`
+- `SPV_KHR_cooperative_matrix`
 
-Once the runtime is working with Path C, swap the frontend:
-1. Replace Linalg pipeline with TritonGPU pipeline
-2. Fork `TritonNvidiaGPUToLLVM` → `TritonVulkanToLLVM`
-3. Use `llvm-spirv` translator instead of MLIR SPIR-V dialect
-4. Reuse the same Vulkan runtime from Phase 4
+**Incremental improvement roadmap:**
 
-**Why this order:** Path C validates the runtime and end-to-end tooling
-with simpler IR. Path A adds performance by improving code generation
-quality, reusing the proven runtime.
+| Step | Feature | SPIR-V Mechanism | Estimated Perf Gain |
+|------|---------|-----------------|-------------------|
+| C+1 | Multi-threaded workgroups | `LocalSize N,1,1` (currently 1,1,1) | 10-50× for elementwise |
+| C+2 | Device-local memory + staging | `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` | 2-5× for large tensors |
+| C+3 | Workgroup shared memory | `Workgroup` storage class | 2-10× for reductions |
+| C+4 | Subgroup ops for reductions | `OpGroupNonUniformFAdd/FMax` | 2-4× for reduce kernels |
+| C+5 | Cooperative matrix for matmul | `OpCooperativeMatrixMulAddKHR` | 10-50× for matmul |
+| C+6 | Discrete GPU selection | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | Correctness fix |
 
-### Why Path C is Feasible (and Not a Dead End)
+**Why C+ beats Path A for our situation:**
 
-The agent's original concern — "MLIR SPIR-V is a dead end" — was about
-the conversion *bridges*, not the SPIR-V dialect itself. The dialect
-works fine for:
-- Representing SPIR-V ops in MLIR (`spirv.Load`, `spirv.Store`, etc.)
-- Serializing to binary SPIR-V (`mlir-translate --serialize-spirv`)
-- Vulkan-specific decorations and capabilities
+1. **Lower risk.** Each step is independently testable. Step C+1 alone
+   could give 10-50× speedup on elementwise kernels.
+2. **No new dependencies.** No SPIRV-LLVM-Translator, no LLVM SPIR-V
+   backend, no vendor-specific dialect.
+3. **Uses proven infrastructure.** Our VulkanizePass + VulkanCompute
+   runtime are already working. We're extending, not rewriting.
+4. **RTX 2080 Ti benefits limited from Path A.** Turing has no TMA,
+   no async copy, no wgmma — the features that make Path A worthwhile
+   are Ampere/Hopper features we can't use anyway.
+5. **cooperative_matrix via MLIR SPIR-V.** MLIR has `spirv.KHR.CooperativeMatrixMulAdd`
+   ops. We can emit them directly from our Linalg matmul, no LLVM-IR needed.
 
-The problem was that `convert-memref-to-spirv` chokes on:
-- `memref.reinterpret_cast` (no SPIR-V equivalent)
-- Unranked memrefs (SPIR-V needs fully typed pointers)
-- Wrong storage classes (alloca → StorageBuffer instead of Function)
+### When Path A Becomes Worth It
 
-Our `PrepareSPIRV.cpp` already solves most of these. The remaining work
-is well-scoped and uses standard MLIR infrastructure.
+Path A makes sense only when ALL of these are true:
+- Target GPU is Ampere+ (async copy, `mma.sync.aligned.m16n8k16`)
+- Need software pipelining (Triton's key optimization)
+- Need >50% CUDA performance
+- Have 2-3 months of dedicated compiler engineering
+- Have deep Triton internals expertise
+
+For the RTX 2080 Ti on Windows, **Path C+ is the right ceiling.**
+Path A would be the next step if you later target datacenter GPUs
+(A100, H100) where async copy and TMA provide the real perf gains.
+
+### Path A: What It Would Actually Take (For Future Reference)
+
+If/when Path A is pursued, here's the honest breakdown:
+
+1. **Add SPIR-V to LLVM build** — Add `SPIRV` to `LLVM_TARGETS_TO_BUILD`
+   in `build-llvm.ps1`. Rebuild LLVM (~2 hours).
+
+2. **Build SPIRV-LLVM-Translator** — Clone KhronosGroup repo, apply
+   Intel's patches, build as static library.
+
+3. **Create SPIRVTargetInfo** — New `TargetInfo` implementation (~800 lines):
+   - Thread/block IDs → SPIR-V built-in variables
+   - `barrier()` → `OpControlBarrier`
+   - `shfl.sync` → `OpGroupNonUniformShuffle`
+   - `printf` → stub or `spirv.DebugPrintf`
+
+4. **Fork key conversion files** (~4 files, ~3000 lines):
+   - `LoadStoreOpToLLVM.cpp` — remove PTX asm, use LLVM loads
+   - `BarrierOpToLLVM.cpp` — replace with SPIR-V barriers
+   - `DotOpToLLVM.cpp` — replace MMA with cooperative_matrix
+   - `SPMDOpToLLVM.cpp` — replace tid/ctaid
+
+5. **Modify address spaces** — NVPTX uses `addrspace(0-5)`, SPIR-V
+   uses different numbering for Generic/Workgroup/CrossWorkgroup.
+
+6. **Add Vulkan wrapper pass** — SPIR-V from LLVM needs entry point
+   decoration, descriptor sets, push constants (similar to VulkanizePass).
+
+7. **SPIR-V serialization** — Wire up translator: LLVM-IR → SPIR-V binary.
+
+8. **Test with existing VulkanCompute runtime** — The runtime is reusable.
+
+**Estimated: ~10K lines C++, ~500 lines Python, 3-4 months.**
 
 ---
 
@@ -937,7 +983,7 @@ is well-scoped and uses standard MLIR infrastructure.
 
 ### Comparison with Our Backend
 
-| Component | Intel (Production) | Ours (Phase 3) |
+| Component | Intel (Production) | Ours (Current) |
 |-----------|-------------------|----------------|
 | Pipeline stages | 5 (ttir→ttgir→llir→spv→zebin) | 4 (ttir→linalg→memref→opencl) |
 | C++ conversion code | ~50,000 lines | ~1,400 lines |
