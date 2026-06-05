@@ -145,7 +145,7 @@ class VulkanBackend(BaseBackend):
     def make_opencl_parallel(src, metadata, opt):
         """Emit parallel OpenCL C from bufferized IR with linalg.generic ops.
 
-        Each workitem processes one element using get_global_id(0).
+        Each workitem processes one element using get_local_id(0).
         Returns OpenCL C source. Sets metadata['block_size'] for dispatch.
         """
         from triton.backends.vulkan.emitter_parallel import emit_opencl_parallel
