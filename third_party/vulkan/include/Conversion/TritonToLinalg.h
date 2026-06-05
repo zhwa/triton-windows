@@ -13,13 +13,11 @@ namespace vulkan {
 
 std::unique_ptr<OperationPass<ModuleOp>> createTritonToLinalgPass();
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertToSPIRVModulePass();
-
 std::unique_ptr<OperationPass<ModuleOp>> createPrepareSPIRVPass();
 
-std::unique_ptr<OperationPass<ModuleOp>> createFinalizeSPIRVPass();
-
 std::unique_ptr<OperationPass<ModuleOp>> createFixAllocaStorageClassPass();
+
+std::unique_ptr<OperationPass<ModuleOp>> createVulkanizePass();
 
 void populateTritonToLinalgConversionPatterns(TypeConverter &typeConverter,
                                               RewritePatternSet &patterns,

@@ -1,17 +1,16 @@
-# Triton Vulkan/SPIR-V Backend: Phase 3 Guide — Parallel OpenCL Emitter
+# Triton OpenCL Emitter Guide — Parallel Execution
 
-**Scope:** Phase 3 — The parallel OpenCL emitter that maps `linalg` ops directly
+**Scope:** The parallel OpenCL emitter that maps `linalg` ops directly
 to OpenCL workitems, achieving 253× speedup over the serial emitter for
 elementwise kernels.
 
-**Audience:** Compiler engineers who have read Guide 1 (Phases 0–1.5) and
-Guide 2 (Phase 2) and want to understand the parallel execution model, the
-tree reduction algorithm, barrier semantics, and how to extend the emitter
-to new ops.
+**Audience:** Compiler engineers who want to understand the parallel execution
+model, the tree reduction algorithm, barrier semantics, and how to extend the
+emitter to new ops.
 
 **Prerequisites:** Understanding of OpenCL work-groups and work-items,
 `linalg.generic` semantics (iterator types, indexing maps, block arguments),
-and the serial emitter architecture from Guide 2 §6.
+and the serial emitter architecture (see `vulkan-backend-guide.md` §Emitter).
 
 ---
 
@@ -37,7 +36,7 @@ and the serial emitter architecture from Guide 2 §6.
 
 ## 1. The Problem: Why Serial Is Slow
 
-The serial emitter (Phase 2, `emitter.py`) produces OpenCL kernels where a
+The serial emitter (`emitter.py`) produces OpenCL kernels where a
 **single workitem** executes the entire block — all 256 elements processed
 sequentially by one thread:
 
@@ -151,7 +150,7 @@ The parallel emitter maps each step to a parallel workitem operation.
 ### Stage Comparison
 
 ```
-Serial pipeline (Phase 2):
+Serial pipeline:
   ┌──────────┐   ┌──────────┐   ┌──────────────────────────────┐   ┌────────────┐
   │ make_ttir│ → │make_linalg│ → │make_memref (buf+loops+cf)    │ → │make_opencl │
   └──────────┘   └──────────┘   └──────────────────────────────┘   └────────────┘
@@ -160,7 +159,7 @@ Serial pipeline (Phase 2):
                                   lower_affine
                                   convert_scf_to_cf
 
-Parallel pipeline (Phase 3):
+Parallel pipeline:
   ┌──────────┐   ┌──────────┐   ┌──────────────────────────────┐   ┌─────────────────┐
   │ make_ttir│ → │make_linalg│ → │make_memref_bufonly (buf only)│ → │make_opencl_par  │
   └──────────┘   └──────────┘   └──────────────────────────────┘   └─────────────────┘
@@ -225,7 +224,7 @@ def add_stages(self, stages, options, language=None):
 ```
 
 The parallel stages are called manually in test scripts. This is deliberate —
-Phase 3 is a proof-of-concept that validates the approach without modifying
+The parallel emitter is a proof-of-concept that validates the approach without modifying
 the framework's stage dispatch mechanism.
 
 ---
@@ -1219,7 +1218,7 @@ produces these.
 
 The parallel pipeline stages (`make_memref_bufonly`, `make_opencl_parallel`)
 are not registered in `VulkanBackend.add_stages()`. They can only be called
-manually. This is intentional for the toy Phase 3 proof-of-concept.
+manually. This is intentional for the proof-of-concept.
 
 ### 5. Block Size Override by Matmul/Transpose
 
@@ -1240,36 +1239,36 @@ all `f32`). Mixed-type reduction chains would require per-reduction
 
 ## 15. Appendix: File Inventory
 
-### New Files (Phase 3)
+### New Files (OpenCL Parallel Emitter)
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `third_party/vulkan/backend/emitter_parallel.py` | ~790 | Parallel OpenCL C emitter |
 | `third_party/vulkan/test/test_kernels_parallel.py` | ~198 | 10-kernel parallel GPU test suite |
-| `.github/skills/triton-windows-vulkan-phase3/SKILL.md` | ~538 | Phase 3 development skill |
+| `.github/skills/triton-windows-opencl/SKILL.md` | ~80 | OpenCL emitter skill |
 
-### Modified Files (Phase 3)
+### Modified Files (OpenCL Parallel Emitter)
 
 | File | Lines Added | Change |
 |------|-------------|--------|
 | `third_party/vulkan/backend/compiler.py` | +28 | `make_memref_bufonly`, `make_opencl_parallel` |
 | `third_party/vulkan/test/bench_kernels.py` | ~50 | Added `compile_parallel`, serial vs parallel comparison |
 
-### Unchanged From Phase 2
+### Unchanged From Converter Infrastructure
 
 The C++ conversion pass (`TritonToLinalg.cpp`), serial emitter (`emitter.py`),
-driver (`driver.py`), and all TTIR test files are unchanged. Phase 3 is
-purely a Python-side addition that reuses the existing TTIR → Linalg
+driver (`driver.py`), and all TTIR test files are unchanged. The parallel
+emitter is purely a Python-side addition that reuses the existing TTIR → Linalg
 conversion and bufferization infrastructure.
 
 ### Class Hierarchy
 
 ```
-emitter.py::OpenCLEmitter        (serial, Phase 2)
+emitter.py::OpenCLEmitter        (serial)
   └─ Walks fully-lowered IR (scf.for, cf.br)
   └─ 1 workitem per block
 
-emitter_parallel.py::ParallelOpenCLEmitter  (parallel, Phase 3)
+emitter_parallel.py::ParallelOpenCLEmitter  (parallel)
   └─ Walks bufferized IR (linalg.generic, linalg.reduce)
   └─ N workitems per block
   └─ Tree reduction with __local memory

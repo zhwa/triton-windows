@@ -33,6 +33,10 @@
 
 #include "Conversion/TritonToLinalg.h"
 
+#ifdef HAVE_VULKAN_RUNTIME
+#include "VulkanCompute.h"
+#endif
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -78,20 +82,20 @@ void init_triton_vulkan_passes_spirv(py::module &&m) {
   m.def("convert_arith_to_spirv", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createConvertArithToSPIRVPass());
   });
+  m.def("convert_math_to_spirv", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::createConvertMathToSPIRVPass());
+  });
   m.def("convert_cf_to_spirv", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createConvertControlFlowToSPIRVPass());
   });
   m.def("convert_func_to_spirv", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createConvertFuncToSPIRVPass());
   });
-  m.def("update_vce", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::spirv::createSPIRVUpdateVCEPass());
-  });
-  m.def("finalize_spirv", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::vulkan::createFinalizeSPIRVPass());
-  });
   m.def("fix_alloca_storage_class", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::vulkan::createFixAllocaStorageClassPass());
+  });
+  m.def("vulkanize", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::vulkan::createVulkanizePass());
   });
 }
 
@@ -137,4 +141,49 @@ void init_triton_vulkan(py::module &&m) {
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
+
+#ifdef HAVE_VULKAN_RUNTIME
+  // Vulkan compute runtime — dispatch SPIR-V shaders on GPU
+  auto vk = m.def_submodule("runtime", "Vulkan compute dispatch");
+
+  py::class_<VulkanCompute>(vk, "VulkanCompute")
+      .def(py::init<>())
+      .def("device_name", &VulkanCompute::getDeviceName)
+      .def("load_shader",
+           [](VulkanCompute &vc, py::bytes spirv_binary,
+              const std::string &entry_point) {
+             std::string data = spirv_binary;
+             if (data.size() % 4 != 0)
+               throw std::runtime_error(
+                   "SPIR-V binary size must be a multiple of 4");
+             std::vector<uint32_t> words(data.size() / 4);
+             std::memcpy(words.data(), data.data(), data.size());
+             vc.loadShader(words, entry_point);
+           },
+           py::arg("spirv_binary"), py::arg("entry_point") = "main")
+      .def("set_workgroups", &VulkanCompute::setWorkgroups, py::arg("x"),
+           py::arg("y") = 1, py::arg("z") = 1)
+      .def("create_buffer", &VulkanCompute::createBuffer, py::arg("binding"),
+           py::arg("size_bytes"))
+      .def("write_buffer",
+           [](VulkanCompute &vc, size_t buf_idx, py::buffer data) {
+             py::buffer_info info = data.request();
+             vc.writeBuffer(buf_idx, info.ptr,
+                            static_cast<size_t>(info.size * info.itemsize));
+           })
+      .def("read_buffer",
+           [](VulkanCompute &vc, size_t buf_idx, py::buffer data) {
+             py::buffer_info info = data.request(true);
+             vc.readBuffer(buf_idx, info.ptr,
+                           static_cast<size_t>(info.size * info.itemsize));
+           })
+      .def("set_push_constants",
+           [](VulkanCompute &vc, py::buffer data) {
+             py::buffer_info info = data.request();
+             vc.setPushConstants(info.ptr,
+                                static_cast<size_t>(info.size * info.itemsize));
+           })
+      .def("dispatch", &VulkanCompute::dispatch)
+      .def("reset", &VulkanCompute::resetShaderState);
+#endif
 }
