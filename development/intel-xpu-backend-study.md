@@ -861,11 +861,12 @@ December 2025. No SPIR-V output path. Not viable as a foundation.
 | **C** | TTIR → Linalg → MLIR SPIR-V → Vulkan | Done (9/9 kernels) | 5-20% CUDA | None | ✅ Done |
 | **C+** | Path C + incremental GPU features | ~2-4K lines, 4-8 weeks | **20-40% CUDA** | **Low** | ✅ **Recommended** |
 
-### Path C+ Details (Recommended Next Step)
+### Path C+ Details (Completed)
 
-Enhance the current working MLIR SPIR-V pipeline with GPU compute
-features. No TTGIR, no LLVM-IR, no vendor-specific code. Just standard
-MLIR passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
+The MLIR SPIR-V pipeline has been enhanced with GPU compute features through
+five incremental steps (C+1 through C+5), all now complete and passing 12/12
+tests. No TTGIR, no LLVM-IR, no vendor-specific code — just standard MLIR
+passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
 
 **Confirmed: RTX 2080 Ti (Turing) supports these Vulkan extensions:**
 - `VK_KHR_cooperative_matrix` (tensor cores via Vulkan!)
@@ -876,14 +877,14 @@ MLIR passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
 
 **Incremental improvement roadmap:**
 
-| Step | Feature | SPIR-V Mechanism | Estimated Perf Gain |
-|------|---------|-----------------|-------------------|
-| C+1 | Multi-threaded workgroups | `LocalSize N,1,1` (currently 1,1,1) | 10-50× for elementwise |
-| C+2 | Device-local memory + staging | `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` | 2-5× for large tensors |
-| C+3 | Workgroup shared memory | `Workgroup` storage class | 2-10× for reductions |
-| C+4 | Subgroup ops for reductions | `OpGroupNonUniformFAdd/FMax` | 2-4× for reduce kernels |
-| C+5 | Cooperative matrix for matmul | `OpCooperativeMatrixMulAddKHR` | 10-50× for matmul |
-| C+6 | Discrete GPU selection | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | Correctness fix |
+| Step | Feature | SPIR-V Mechanism | Status |
+|------|---------|-----------------|--------|
+| C+1 | Multi-threaded workgroups | `WorkgroupId` builtin | ✅ Done |
+| C+2 | Device-local memory + staging | `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` | ✅ Done |
+| C+3 | Workgroup shared memory | `Workgroup` storage class + barriers | ✅ Done |
+| C+4 | Subgroup ops for reductions | `OpGroupNonUniformFAdd/FMax` | ✅ Done |
+| C+5 | Cooperative matrix for matmul | `OpCooperativeMatrixMulAddKHR` | ✅ Done |
+| C+6 | Discrete GPU selection | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | 🔲 Future |
 
 **Why C+ beats Path A for our situation:**
 

@@ -1,6 +1,6 @@
 ---
 name: triton-windows-vulkan
-description: "Foundation Vulkan/SPIR-V backend for triton-windows. Covers the full TTIR→SPIR-V→Vulkan dispatch pipeline: 16 TritonToLinalg converters, 7 bridge passes, VulkanizePass, VulkanCompute runtime, and 18 documented traps. For performance improvements (C+ steps: WorkgroupId, device-local memory, shared memory), see `triton-windows-vulkan-perf`."
+description: "Foundation Vulkan/SPIR-V backend for triton-windows. Covers the full TTIR→SPIR-V→Vulkan dispatch pipeline: 16 TritonToLinalg converters, 7 bridge passes, VulkanizePass, VulkanCompute runtime, and 18 documented traps. For performance improvements (C+ steps: WorkgroupId, device-local memory, shared memory, subgroups, cooperative matrix), see `triton-windows-vulkan-perf`."
 argument-hint: "pipeline | converters | bridge-passes | vulkanize | push-constants | runtime | traps | diagnostics"
 user-invocable: true
 ---
@@ -263,7 +263,51 @@ the `triton-windows-vulkan-perf` skill.
 
 ---
 
-## 9. Lessons Learned
+## 9. Reproducing from Scratch (Optimal Journey)
+
+If starting from a fresh clone, follow this order:
+
+### Phase 1: Foundation (base skill — this document)
+
+1. **Build triton-windows** — use `triton-windows-build` skill
+2. **Implement 16 TritonToLinalg converters** (TritonToLinalg.cpp, ~1350 lines)
+   - Start with FMA kernel (simplest: no masks, no scalars)
+   - Add converters incrementally: splat → range → broadcast → addptr → load → store → dot → reduce
+   - Test each with `str_nodebug()` dumps, NOT with GPU dispatch yet
+3. **Implement 7 bridge passes** (PrepareSPIRV.cpp, ~500 lines)
+   - Must run BEFORE upstream `convert-*-to-spirv`
+   - Key insight: upstream SPIR-V passes assume structured IR; Triton's pointer-heavy IR needs bridge
+4. **Implement VulkanizePass** (PrepareSPIRV.cpp, ~400 lines)
+   - This is the critical innovation: func args → Vulkan GlobalVariables/builtins
+   - Without it, NVIDIA driver crashes at pipeline creation
+5. **Implement VulkanCompute runtime** (VulkanCompute.{h,cpp}, ~600 lines)
+   - VkInstance → VkDevice → VkBuffer → VkShaderModule → VkPipeline → vkCmdDispatch
+6. **Wire Python pipeline** (compiler.py) + pybind11 (triton_vulkan.cc)
+7. **First GPU test**: vector_add (verify end-to-end)
+
+### Phase 2: Performance (perf skill — `triton-windows-vulkan-perf`)
+
+Follow C+1 → C+5 **in order**. Each builds on the previous:
+
+| Step | What You Learn | Infrastructure Created |
+|------|---------------|----------------------|
+| C+1 | Placeholder pattern, builtin variables | WorkgroupId, `emitError` pattern |
+| C+2 | Vulkan memory management | Staging buffers, device-local |
+| C+3 | Shared memory, barriers, module attributes | ConvertReductionToParallel, shared var promotion |
+| C+4 | Subgroup operations | GroupNonUniform ops, combiner classification |
+| C+5 | Buffer-forwarding architecture | traceToFuncArg, attribute-based operand passing |
+
+**Do NOT skip steps.** C+5 depends on the placeholder pattern (C+1/C+3),
+module attributes (C+3), and GlobalVariable manipulation (C+1/C+3).
+
+### What to Skip
+
+- **OpenCL emitters** — optional debugging aids. Debug via `str_nodebug()` instead.
+- **Path A (TTGIR→LLVM→SPIR-V)** — not viable for Turing. See `development/intel-xpu-backend-study.md`.
+
+---
+
+## 10. Lessons Learned
 
 1. **Bridge passes are standard practice** — IREE, Intel XPU all do this. The
    MLIR SPIR-V dialect is fine; the upstream bridges assume different IR shapes.

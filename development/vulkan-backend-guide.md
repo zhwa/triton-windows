@@ -29,9 +29,10 @@ This document is self-contained and reflects the current unified backend organiz
 15. [Testing and Diagnostics](#15-testing-and-diagnostics)
 16. [Test Suite Architecture](#16-test-suite-architecture)
 17. [Kernel-by-Kernel Analysis](#17-kernel-by-kernel-analysis)
-18. [Remaining Work and Future Directions](#18-remaining-work-and-future-directions)
-19. [Lessons Learned](#19-lessons-learned)
-20. [Appendix: File Inventory and Change Summary](#20-appendix-file-inventory-and-change-summary)
+18. [Path C+: Incremental Performance Improvements](#18-path-c-incremental-performance-improvements)
+19. [Remaining Work and Future Directions](#19-remaining-work-and-future-directions)
+20. [Lessons Learned](#20-lessons-learned)
+21. [Appendix: File Inventory and Change Summary](#21-appendix-file-inventory-and-change-summary)
 
 ---
 
@@ -132,7 +133,7 @@ third_party/vulkan/
 ├── lib/Conversion/
 │  ├── TritonToLinalg.cpp  # 16 conversion patterns (1125 lines)
 │  ├── TritonToLinalgPass.cpp # Pass wrapper + type converter (210 lines)
-│  └── PrepareSPIRV.cpp   # SPIR-V preparation + finalization (626 lines)
+│  └── PrepareSPIRV.cpp   # SPIR-V bridge + Vulkanization passes (~1601 lines)
 ├── test/
 │  ├── lit.cfg.py      # Lit test configuration
 │  ├── test_triton_to_linalg.mlir
@@ -170,7 +171,7 @@ Stage 3: │ make_memref  (standard MLIR lowering passes)      │
      └────────────────────────┬──────────────────────────────────┘
                  │ MemRef + Arith + CF IR
      ┌────────────────────────▼──────────────────────────────────┐
-Stage 4: │ make_spirv  (SPIR-V conversion — 3 sub-steps)     │
+Stage 4: │ make_spirv  (SPIR-V preparation + conversion)   │
      │  prepare_spirv    (expand reinterpret_cast/copy)  │
      │  map_storage_class  (addr space 0 → StorageBuffer)  │
      │  fix_alloca      (alloca: StorageBuffer→Function) │
@@ -185,8 +186,13 @@ Stage 5: │ make_spv   (wrap in spirv.module + serialize)    │
      └────────────────────────┬──────────────────────────────────┘
                  │ SPIR-V binary bytes
                  ▼
-             (future: Vulkan dispatch)
+             Vulkan dispatch / runtime execution
 ```
+
+`PrepareSPIRV.cpp` now hosts multiple Stage-4/Stage-5 passes rather than one
+small cleanup pass: `PrepareSPIRVPass` (bridge pass),
+`ConvertReductionToParallel`, `ConvertMatmulToCooperative`,
+`FixAllocaStorageClassPass`, and `VulkanizePass`.
 
 ### 2.3 Relation to Triton's Backend Interface
 
@@ -214,6 +220,7 @@ A few details in the original split notes have changed since they were first wri
 - Push-constant member offsets are computed from the actual scalar type sizes in `PrepareSPIRV.cpp`; they are no longer hardcoded as `i * 4`.
 - The Vulkan runtime sets `VkApplicationInfo::pApplicationName` to `"Triton-Vulkan"`.
 - `VulkanCompute::setPushConstants()` tears down dependent pipeline and descriptor state before rebuilding, so the earlier descriptor-layout leak is fixed.
+- `VulkanCompute.cpp` now queries subgroup size during device selection, conditionally enables device extensions, and prefers device-local buffers with host-visible staging buffers when discrete-GPU VRAM is available.
 - The obsolete `RemoveCollapseShape` dead code is gone from `PrepareSPIRV.cpp`; collapse-shape cleanup now lives only in the active rewrite paths.
 - The old stage-specific skills were consolidated into `triton-windows-vulkan` and `triton-windows-opencl`.
 
@@ -341,9 +348,11 @@ memref view of that buffer. The offset/stride information comes from the
 `tt.addptr` pattern, not from the pointer type itself.
 
 **Program info injection.** Triton kernels call `tl.program_id(axis)` and
-`tl.num_programs(axis)` to get their position in the launch grid. In NVIDIA,
-these map to `%ctaid.x` and `%nctaid.x` PTX registers. In our portable
-backend, we pass them as explicit function arguments:
+`tl.num_programs(axis)` to get their position in the launch grid. Later C+
+passes also need `local_id`. In NVIDIA, these map to `%ctaid.*`, `%nctaid.*`,
+and `%tid.*` registers. In our portable backend, `TritonToLinalgPass`
+initially appends explicit function arguments that later map to Vulkan
+builtins and push constants:
 
 ```
 BEFORE: tt.func @kernel(%arg0: !tt.ptr<f32>) {
@@ -353,15 +362,17 @@ BEFORE: tt.func @kernel(%arg0: !tt.ptr<f32>) {
 
 AFTER: func.func @kernel(%arg0: memref<*xf32>,
               %num_x: i32, %num_y: i32, %num_z: i32,
-              %pid_x: i32, %pid_y: i32, %pid_z: i32) {
-     // %pid_x replaces tt.get_program_id x
+              %pid_x: i32, %pid_y: i32, %pid_z: i32,
+              %lid_x: i32, %lid_y: i32, %lid_z: i32) {
+     // %pid_x replaces tt.get_program_id x during TritonToLinalg
      ...
     }
 ```
 
-Six i32 arguments are appended: `num_programs(x,y,z)` and `program_id(x,y,z)`.
-The `GetProgramIDConverter` and `GetNumProgramsConverter` patterns simply
-extract the corresponding block argument.
+Nine i32 arguments are appended (`TRITON_PROGRAM_INFO_ARG_COUNT = 9`):
+`num_programs(x,y,z)`, `program_id(x,y,z)`, and `local_id(x,y,z)`.
+`GetProgramIDConverter` extracts `numArgs-6..numArgs-4`; the last three args
+are `local_id`, and `GetNumProgramsConverter` extracts `numArgs-9..numArgs-7`.
 
 ### 4.2 Core Conversion Patterns
 
@@ -495,7 +506,7 @@ The pass wrapper in `TritonToLinalgPass.cpp` ties everything together:
 void runOnOperation() override {
   // 1. Set up type converter, conversion target, patterns
   // 2. Mark standard dialects as legal, Triton ops as illegal
-  // 3. Add program info args (6 × i32) to each tt.func
+  // 3. Add program info args (9 × i32) to each tt.func
   // 4. Apply partial conversion
   // 5. Convert tt.func/tt.return → func.func/func.return
   // 6. Canonicalize
@@ -720,7 +731,7 @@ tt.func @vector_add(%x_ptr: !tt.ptr<f32>, %y_ptr: !tt.ptr<f32>,
 **After make_linalg (TritonToLinalg pass):**
 
 The kernel becomes a `func.func` with:
-- 3 `memref<*xf32>` args (type-converted pointers) + 1 `i32` (N) + 6 `i32` (program info)
+- 3 `memref<*xf32>` args (type-converted pointers) + 1 `i32` (N) + 9 `i32` (program info: num_programs×3, program_id×3, local_id×3)
 - `memref.reinterpret_cast` for each pointer+offset pattern
 - `memref.alloc + linalg.fill + memref.copy` for each load
 - `arith.addf` on tensors (will become `linalg.generic` via elementwise promotion)
@@ -751,7 +762,7 @@ Specifically:
 | Matrix multiply | Small tile matmul (16×16) | ✅ Complete |
 | 2D operations | Transpose, broadcast add | ✅ Complete |
 | Atomic operations | atomic_rmw (fadd, add, max, etc.) | ✅ Complete |
-| End-to-end GPU tests | OpenCL execution with numpy reference | ✅ Complete |
+| End-to-end GPU tests | Serial OpenCL + Vulkan SPIR-V execution with numpy reference | ✅ Complete |
 | Performance baseline | Timing vs CUDA backend | ❌ Future work |
 
 ### 6.1 What Changed (File Summary)
@@ -762,9 +773,10 @@ Modified (3 files, +356 lines):
  third_party/vulkan/lib/Conversion/TritonToLinalgPass.cpp +48 lines
  third_party/vulkan/backend/emitter.py          +125 lines (net)
 
-New (13 files):
- third_party/vulkan/test/test_*.ttir    (12 TTIR kernel files)
- third_party/vulkan/test/test_kernels.py  (275-line GPU test harness)
+Test assets:
+ third_party/vulkan/test/test_*.ttir             (12 TTIR kernel files)
+ third_party/vulkan/test/test_kernels.py         (serial OpenCL suite, 14 tests)
+ third_party/vulkan/test/test_kernels_vulkan.py  (Vulkan SPIR-V suite, 12 tests)
 
 Cleanup:
  third_party/vulkan/lib/Conversion/PrepareSPIRV.cpp   -254 lines
@@ -1444,8 +1456,10 @@ The `make_spv()` method was also improved:
 ### 12.3 Current Status
 
 The temporary `createFinalizeSPIRVPass()` compatibility stub described in the
-earlier notes is gone. `PrepareSPIRV.cpp` now contains only the live preparation
-and Vulkan/SPIR-V finalization logic used by the unified backend.
+earlier notes is gone. `PrepareSPIRV.cpp` is now the large shared home for the
+live SPIR-V bridge/finalization passes: `PrepareSPIRVPass`,
+`ConvertReductionToParallel`, `ConvertMatmulToCooperative`,
+`FixAllocaStorageClassPass`, and `VulkanizePass`.
 
 The old `RemoveCollapseShape` dead code is gone as well. Collapse-shape cleanup
 now happens only in the active rewrite paths that still participate in lowering.
@@ -1776,12 +1790,14 @@ print(f"SPIR-V binary: {len(binary)} bytes")
 The test suite takes a **compilation-first** approach:
 
 1. Write hand-crafted TTIR (Triton IR) for each kernel pattern
-2. Compile through the full pipeline: TTIR → Linalg → MemRef → OpenCL C
-3. Execute on GPU via pyopencl
+2. Compile through the full pipeline: TTIR → Linalg → MemRef → OpenCL C or SPIR-V
+3. Execute on GPU via pyopencl or the Vulkan runtime
 4. Compare against numpy reference implementations
 
 This tests the **entire backend** end-to-end, not just individual passes.
 If any pass produces incorrect IR, the GPU result will diverge from numpy.
+Today that coverage is split across `test_kernels.py` (14 serial OpenCL tests)
+and `test_kernels_vulkan.py` (12 Vulkan SPIR-V dispatch tests).
 
 ### 16.2 Pipeline Under Test
 
@@ -1796,7 +1812,7 @@ If any pass produces incorrect IR, the GPU result will diverge from numpy.
         GPU execution → numpy comparison
 ```
 
-The `compile_ttir()` function in `test_kernels.py` drives this:
+The `compile_ttir()` function in `test_kernels.py` drives this serial OpenCL reference path:
 
 ```python
 def compile_ttir(ttir_path):
@@ -1827,19 +1843,21 @@ def test_foo():
   xb = cl.Buffer(ctx, RO, hostbuf=x)
   ob = cl.Buffer(ctx, WO, N * 4)
   # Run kernel (with program info args)
-  args = [xb, ob, np.int32(N)] + [np.int32(0)] * 6
+  args = [xb, ob, np.int32(N)] + [np.int32(0)] * 9
   run_kernel(src, md, args)
   # Read result and compare
   o = read_buf(ob, N)
   return np.max(np.abs(o - expected)) # max absolute error
 ```
 
-**The 6 extra `np.int32(0)` args:** These are the program info arguments
+**The 9 extra `np.int32(0)` args:** These are the program info arguments
 that the Vulkan backend adds to every kernel:
 - `num_programs_x`, `num_programs_y`, `num_programs_z` — grid dimensions
 - `program_id_x`, `program_id_y`, `program_id_z` — current program index
+- `local_id_x`, `local_id_y`, `local_id_z` — thread index within the workgroup
 
-For single-block tests, all are 0 (or 1 for num_programs).
+For single-block serial tests, `num_programs` is typically 1 and both
+`program_id` and `local_id` are 0.
 
 ### 16.4 Error Tolerances
 
@@ -2025,36 +2043,158 @@ the splat pattern before type conversion.
 
 ---
 
-## 18. Remaining Work and Future Directions
+## 18. Path C+: Incremental Performance Improvements
 
-### 18.1 Current Gaps
+After achieving correctness with the base pipeline (§1-§17), the backend was
+enhanced with five incremental GPU compute features. Each step added one
+Vulkan/SPIR-V capability while preserving all existing tests.
+
+### 18.1 Architecture: The Placeholder Pattern
+
+The key innovation across C+1 through C+5 is the **placeholder pattern**:
+insert `func.call @__vulkan_*()` calls at the MemRef level, let them survive
+unchanged through all MLIR conversion passes (`func→spirv` converts them to
+`spirv.FunctionCall`), then replace them in VulkanizePass with actual SPIR-V
+ops. This solves a fundamental MLIR infrastructure gap — there is no clean way
+to express GPU-specific operations (barriers, subgroup ops, cooperative matrix)
+at the MemRef level that survives through dialect conversion.
+
+### 18.2 C+1: WorkgroupId for program_id
+
+**Problem:** Multi-block dispatch required N serial dispatches, each setting
+`program_id` as a push constant.
+
+**Solution:** Replace the last 3 scalar args (program_id x,y,z) with a SPIR-V
+`WorkgroupId` builtin. VulkanizePass creates `spirv.GlobalVariable
+@__builtin_workgroup_id` with `BuiltIn WorkgroupId` decoration, reads via
+`spirv.CompositeExtract`. Host calls `vkCmdDispatch(num_blocks, 1, 1)` and
+all blocks execute in parallel.
+
+**Result:** Push constants reduced by 12 bytes. All blocks in a single dispatch.
+
+### 18.3 C+2: Device-Local Memory
+
+**Problem:** Storage buffers used host-visible PCIe BAR memory (~256MB), not
+true GPU VRAM.
+
+**Solution:** `createBuffer` now tries `DEVICE_LOCAL` VRAM first, creates a
+host-visible staging buffer alongside, and uses `vkCmdCopyBuffer` for
+transfers. `findMemoryTypeFallback` explicitly skips BAR memory (both
+`DEVICE_LOCAL` and `HOST_VISIBLE`) to find the large non-host-visible heap.
+Falls back to host-visible-only on integrated GPUs.
+
+**Trap C2-1:** On discrete GPUs, there's a ~256MB memory type that is BOTH
+`DEVICE_LOCAL` and `HOST_VISIBLE` — the PCIe BAR, not true VRAM. Many Vulkan
+tutorials get this wrong.
+
+### 18.4 C+3: Workgroup Shared Memory
+
+**Problem:** Reductions (sum, max, softmax) ran serially on one thread.
+
+**Solution:** `ConvertReductionToParallel` pass transforms `linalg.reduce` →
+parallel tree reduction using shared memory (`memref.alloca` in address space 3
+→ Workgroup) with `func.call @__vulkan_barrier` placeholders. VulkanizePass
+promotes Function-scope shared Variables to module-scope Workgroup
+GlobalVariables and replaces barrier calls with `spirv.ControlBarrier`.
+
+This was the most complex step (8 traps documented). Key challenges:
+- `gpu.barrier` is silently ignored by `convert-gpu-to-spirv` (trap C3-1)
+- `convert-memref-to-spirv` forces ALL Variables to Function class (trap C3-3)
+- Shared Variables must be at module scope per SPIR-V spec (trap C3-4)
+- Adding 3 local_id args shifted all existing arg indices (trap C3-6)
+
+**Arg layout after C+3:** `[...original..., num_programs×3, pid×3, local_id×3]`
+
+### 18.5 C+4: Subgroup Operations
+
+**Problem:** Tree reduction used 8 barriers for 256-element reductions.
+
+**Solution:** Stop the shared-memory tree reduction at stride = subgroupSize
+(32), then emit a single `spirv.GroupNonUniformFAdd/IAdd/FMax/SMax` for the
+final 32→1 reduction. Reduces barriers from 8 to 3 for 256-element reductions.
+
+Uses the same placeholder pattern: `func.call @__vulkan_subgroup_reduce_*`
+→ VulkanizePass replaces with `spirv.GroupNonUniform*Op`. VCE triple
+conditionally upgraded to V_1_3 with GroupNonUniform capabilities.
+
+### 18.6 C+5: Cooperative Matrix (Buffer-Forwarding)
+
+**Problem:** Cooperative matrix Load/Store requires StorageBuffer pointers,
+but the `tt.load` → `memref.alloc` → `memref.copy` pattern produces
+Function-class pointers in SPIR-V (invalid → driver crashes).
+
+**Solution:** Buffer-forwarding architecture:
+1. `ConvertMatmulToCooperative` traces matmul operands backward through the
+   IR (alloc → memref.copy → reinterpret_cast → BlockArgument) to find
+   the original buffer function arg indices
+2. Stores them as module attributes: `vulkan.coop_buffer_args = [0, 1, 2]`
+3. Emits a **no-arg** placeholder: `call @__vulkan_coop_matmul()`
+4. VulkanizePass maps arg indices → StorageBuffer GlobalVariables,
+   creates `AccessChain @bindingN[0][0]` → StorageBuffer pointer
+5. Emits `KHRCooperativeMatrixLoad`, `MulAdd`, `FConvert`, `Store`
+
+**Key insight:** The no-arg placeholder is essential — it eliminates
+`FixAllocaStorageClass` type mangling that caused earlier attempts to fail.
+
+VCE triple conditionally upgraded to V_1_6 with CooperativeMatrixKHR,
+Float16, and StorageBuffer16BitAccess capabilities. Device extensions
+queried via `vkEnumerateDeviceExtensionProperties` before enabling.
+
+### 18.7 Current VulkanizePass Responsibilities
+
+After C+1 through C+5, VulkanizePass handles 9 responsibilities:
+1. Buffer args → GlobalVariables with descriptor bindings
+2. WorkgroupId builtin for program_id (C+1)
+3. LocalInvocationId builtin for local_id (C+3)
+4. Push constants for remaining scalar args
+5. Shared memory Variable promotion to Workgroup (C+3)
+6. Barrier replacement (C+3)
+7. Subgroup reduce replacement (C+4)
+8. Cooperative matrix replacement with buffer-forwarding (C+5)
+9. Module wrapping (spirv.module, EntryPoint, ExecutionMode)
+
+### 18.8 Test Suite Evolution
+
+| Milestone | Tests | Key additions |
+|-----------|-------|---------------|
+| Base | 7 | vector_add, fma, gelu, swiglu, reduce_sum, reduce_max, softmax |
+| +matmul | 9 | matmul_16x16, transpose |
+| +C+1 | 10 | vadd_multiblock (1024 elements, 4 workgroups) |
+| +C+2 | 11 | vadd_65k (65536 elements, 256 workgroups) |
+| +C+5 | 12 | matmul_coop_f16 (16×16 cooperative matrix) |
+
+## 19. Remaining Work and Future Directions
+
+### 19.1 Current Gaps
 
 | Item | Priority | Description |
 |------|----------|-------------|
-| Performance baseline | Medium | Time kernels vs CUDA, establish baseline |
-| Multi-block execution | Medium | Test with `num_programs > 1` |
-| True 2D broadcast | Low | `expand_dims + broadcast` pattern |
-| CAS atomic | Low | Compare-and-swap needs different IR structure |
-| `__init__.py` | Low | Add backend docstring |
-| Final packaging maintenance | Low | Keep Vulkan/SPIR-V finalization well-factored as the backend grows |
+| Performance baseline | Medium | Time kernels vs CUDA/OpenCL and establish a C+ performance baseline |
+| Discrete GPU preference | Medium | Prefer true discrete GPUs/VRAM heaps when multiple Vulkan devices are present |
+| Dynamic shapes | Medium | Relax fixed-shape assumptions in tests, metadata, and push-constant packing |
+| Autotuning | Medium | Explore block-size, subgroup-size, and cooperative-matrix tuning strategies |
+| `@triton.jit` integration | Medium | Wire the backend into Triton's higher-level launch/runtime flow |
 
-### 18.2 Native TTG→SPIR-V as a Future Direction
+### 19.2 Native TTG→SPIR-V as a Future Direction
 
-A future direction targets the **Route A** approach from the roadmap: consuming
-TritonGPU IR directly and lowering to SPIR-V, bypassing the Linalg path.
+A longer-term direction still targets the **Route A** approach from the
+roadmap: consuming TritonGPU IR directly and lowering to SPIR-V, bypassing the
+Linalg path. After C+1 through C+5, the motivation is no longer basic feature
+coverage — it is richer layout-aware codegen, dynamic shapes, and deeper
+performance tuning.
+
 This would enable:
 
-- **Shared memory** via `spirv.Variable(Workgroup)`
-- **Workgroup barriers** via `spirv.ControlBarrier`
-- **Cooperative matrix** via `VK_KHR_cooperative_matrix` extension
-- **Multi-workgroup** execution with true atomics
-- **Performance parity** with CUDA for supported operations
+- **Direct TritonGPU layout lowering** instead of reconstructing structure later
+- **Stronger autotuning hooks** for tile sizes, subgroup strategies, and MMA paths
+- **Tighter `@triton.jit` integration** with less backend-specific glue
+- **A cleaner long-term path** toward performance parity with CUDA on supported ops
 
 The key challenge is implementing TTGIR layout encodings (blocked, sliced,
 shared) for Vulkan's compute model, which differs significantly from
 CUDA's warp-level execution.
 
-### 18.3 Converter Coverage Summary
+### 19.3 Converter Coverage Summary
 
 | Converter | Coverage Area | Ops Covered |
 |-----------|---------------|-------------|
@@ -2081,9 +2221,9 @@ For the dedicated OpenCL emitter material, see `opencl-emitter-guide.md`.
 
 ---
 
-## 19. Lessons Learned
+## 20. Lessons Learned
 
-### 19.1 On MLIR Pass Development
+### 20.1 On MLIR Pass Development
 
 **MLIR's partial conversion is your friend.** Full conversion fails hard when
 any op can't be converted. Partial conversion lets legal ops pass through and
@@ -2101,7 +2241,7 @@ or erase ops, always collect ops first, then process them. Erasing during
 a walk invalidates iterators. Use `llvm::make_early_inc_range` or collect
 into a `SmallVector` first.
 
-### 19.2 On SPIR-V Conversion
+### 20.2 On SPIR-V Conversion
 
 **Silent failures are the norm.** Most SPIR-V conversion passes silently
 skip ops they don't recognize. The only symptom is that `convert-func-to-spirv`
@@ -2118,7 +2258,7 @@ buffers (function args), `Function` is for local variables (alloca),
 `Workgroup` is for shared memory. Getting these wrong causes silent
 conversion failures.
 
-### 19.3 On Triton Backend Development
+### 20.3 On Triton Backend Development
 
 **Start with the simplest possible kernel.** Vector addition is ideal: one
 load pattern, one store pattern, one elementwise op, one program_id usage.
@@ -2134,7 +2274,7 @@ walkthrough, see `opencl-emitter-guide.md`.
 stages (e.g., wrong pointer analysis) manifest as wrong code in later stages
 (e.g., wrong SPIR-V). Print IR after each stage and verify it looks correct.
 
-### 19.4 On MSVC-Specific Issues
+### 20.4 On MSVC-Specific Issues
 
 The Triton build on Windows (MSVC) has its own set of challenges documented
 in the build skill. The Vulkan backend adds:
@@ -2150,15 +2290,15 @@ in the build skill. The Vulkan backend adds:
 
 ---
 
-## 20. Appendix: File Inventory and Change Summary
+## 21. Appendix: File Inventory and Change Summary
 
-### 20.1 Source Files
+### 21.1 Source Files
 
 | File | Lines | Coverage Area | Description |
 |------|-------|-------|-------------|
 | `lib/Conversion/TritonToLinalg.cpp` | 1002 | TritonToLinalg + memory ops | 16 conversion patterns + PtrState analysis |
 | `lib/Conversion/TritonToLinalgPass.cpp` | 176 | TritonToLinalg conversion | Pass wrapper, type converter, target setup |
-| `lib/Conversion/PrepareSPIRV.cpp` | 321 | SPIR-V conversion | PrepareSPIRV + FixAlloca + FinalizeSPIRV passes |
+| `lib/Conversion/PrepareSPIRV.cpp` | 1601 | SPIR-V conversion | PrepareSPIRV, ConvertReductionToParallel, ConvertMatmulToCooperative, FixAllocaStorageClass, and Vulkanize passes |
 | `triton_vulkan.cc` | 141 | Backend skeleton + SPIR-V conversion | pybind11 bindings for all passes + serialization |
 | `include/Conversion/TritonToLinalg.h` | 32 | TritonToLinalg conversion | Public pass factory declarations |
 | `backend/compiler.py` | 273 | Pipeline orchestration across the backend | VulkanBackend with 6 pipeline stages |
@@ -2167,7 +2307,7 @@ in the build skill. The Vulkan backend adds:
 | `backend/__init__.py` | — | Backend skeleton | Backend discovery exports |
 | `CMakeLists.txt` | 68 | Pipeline orchestration across the backend | Build rules for static lib + pybind11 module |
 
-### 20.2 Test Files
+### 21.2 Test Files
 
 | File | Coverage Area | Tests |
 |------|-------|-------|
@@ -2178,20 +2318,20 @@ in the build skill. The Vulkan backend adds:
 | `test/test_scf_to_spirv.mlir` | SPIR-V conversion | scf.for → spirv structured control flow |
 | `test/lit.cfg.py` | SPIR-V conversion | Lit test runner configuration |
 
-### 20.3 Tool Files
+### 21.3 Tool Files
 
 | File | Purpose |
 |------|---------|
 | `tools/vulkan-opt.py` | SPIR-V conversion + serialization CLI wrapper |
 
-### 20.4 Skill Files
+### 21.4 Skill Files
 
 | File | Purpose |
 |------|---------|
 | `.github/skills/triton-windows-vulkan/SKILL.md` | Unified Vulkan/SPIR-V backend skill with the current traps, passes, push-constant, and runtime notes |
 | `.github/skills/triton-windows-opencl/SKILL.md` | Unified OpenCL/emitter skill covering the serial and parallel debugging paths |
 
-### 20.5 Conversion Pattern Reference
+### 21.5 Conversion Pattern Reference
 
 | Pattern | Triton Op | Output | Covered In |
 |---------|-----------|--------|-------|
@@ -2214,7 +2354,7 @@ in the build skill. The Vulkan backend adds:
 | `ExpandMemRefCopy` | `memref.copy` | `scf.for { load; store }` | SPIR-V conversion |
 | `RemoveDealloc` | `memref.dealloc` | (erased) | SPIR-V conversion |
 
-### 20.6 Modified Files
+### 21.6 Modified Files
 
 | File | Lines Changed | What Changed |
 |------|--------------|--------------|
@@ -2226,7 +2366,7 @@ in the build skill. The Vulkan backend adds:
 | `lit.cfg.py` | +5/-8 | Simplified path detection |
 | `.github/skills/triton-windows-vulkan/SKILL.md` | updated | Skill documentation aligned with the unified backend naming and current SPIR-V/Vulkan notes |
 
-### 20.7 New Test Files
+### 21.7 New Test Files
 
 | File | Lines | Pattern Tested |
 |------|-------|----------------|
@@ -2242,9 +2382,10 @@ in the build skill. The Vulkan backend adds:
 | `test_broadcast_add.ttir` | 38 | Dual-source elementwise add |
 | `test_transpose.ttir` | 29 | 16×16 transpose with reshape |
 | `test_atomic_add.ttir` | 14 | Per-element atomic fadd (splat ptr → ranked memref) |
-| `test_kernels.py` | 275 | End-to-end GPU test harness (12 kernels) |
+| `test_kernels.py` | 275 | End-to-end serial OpenCL test harness (14 tests) |
+| `test_kernels_vulkan.py` | 120 | Vulkan SPIR-V dispatch harness (12 tests) |
 
-### 20.8 Op Coverage Matrix
+### 21.8 Op Coverage Matrix
 
 | Op | test_vec | test_mul | test_fma | test_gelu | test_swi | test_rsum | test_rmax | test_soft | test_mat | test_brd | test_trn | test_atm |
 |----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|

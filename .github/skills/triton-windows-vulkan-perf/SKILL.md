@@ -12,10 +12,17 @@ Vulkan compute feature while preserving all existing tests.
 
 **Philosophy:** _"Premature optimization is the root of all evil."_ — Knuth.
 Get correctness first (base skill), then improve performance one feature
-at a time. Every step is a working commit with 11/11 tests passing.
+at a time. Every step is a working commit with 12/12 tests passing.
 
 **Prerequisite:** The base `triton-windows-vulkan` skill must be complete
 (16 converters, 7 bridge passes, VulkanizePass, VulkanCompute runtime).
+
+**Ordering is critical.** Each C+ step builds infrastructure used by later steps:
+- C+1 invents the **placeholder pattern** and **builtin variable creation**
+- C+3 invents **module attributes**, **shared memory promotion**, and **type rebuilding**
+- C+5 combines all of the above into the **buffer-forwarding architecture**
+
+Do NOT attempt C+5 without completing C+1–C+4 first.
 
 ## 1. C+ Roadmap
 
@@ -287,6 +294,45 @@ VulkanizePass:
 | `createLogicalDevice` | Queries `vkEnumerateDeviceExtensionProperties`. Enables coop matrix only if supported. |
 | VCE triple | V_1_6 + CooperativeMatrixKHR + Float16 + StorageBuffer16BitAccess (conditional) |
 | Test | `matmul_coop_f16`: 16×16 f16 cooperative matmul, error ~0.015 |
+
+### How to Reproduce
+
+**CRITICAL: Cooperative matrix ops require StorageBuffer pointers.** The
+`tt.load` → `memref.alloc` → `memref.copy` pattern produces Function-class
+pointers in SPIR-V, which are INVALID for cooperative matrix Load/Store
+(driver crashes at `vkCreateComputePipelines`). The solution is
+**buffer-forwarding**: trace operands backward to find the original buffer
+function args, pass their indices via module attributes, and have
+VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
+
+1. **`ConvertMatmulToCooperative` pass** (PrepareSPIRV.cpp):
+   - Only match static 16×16 f16 `linalg.matmul` (after bufferize)
+   - `traceToFuncArg()`: walk `AllocOp` → find `CopyOp(source, alloc)` →
+     trace source through `ReinterpretCastOp`/`CastOp` → `BlockArgument`
+   - `traceOutputToFuncArg()`: walk alloc users forward →
+     find `CopyOp(alloc, dest)` → trace dest to `BlockArgument`
+   - Store `vulkan.coop_buffer_args = [argA, argB, argC]` on module
+   - Store `vulkan.coop_dims = [M, N, K]` on module
+   - Emit **no-arg** placeholder: `call @__vulkan_coop_matmul()`
+   - **No-arg is essential** — avoids FixAllocaStorageClass type mangling
+
+2. **VulkanizePass** coop replacement:
+   - Read `vulkan.coop_buffer_args` → `findGlobalVar(argIdx)` maps to `@bindingN`
+   - `AddressOf @bindingN` → `AccessChain [0][0]` → `ptr<f16, StorageBuffer>`
+   - `KHRCooperativeMatrixLoad(ptr, RowMajor, stride)` for A and B
+   - `CompositeConstruct(0.0f)` → zero f32 accumulator
+   - `KHRCooperativeMatrixMulAdd(A, B, zero)` → f32 result
+   - `FConvert` f32→f16 → `KHRCooperativeMatrixStore`
+
+3. **VulkanCompute.cpp**: Query `vkEnumerateDeviceExtensionProperties`
+   before enabling `VK_KHR_cooperative_matrix`. **Never enable
+   unconditionally** — crashes GPUs without support (trap C5-3).
+
+4. **VCE triple**: Conditionally add `V_1_6 + CooperativeMatrixKHR +
+   Float16 + StorageBuffer16BitAccess + SPV_KHR_cooperative_matrix +
+   SPV_KHR_16bit_storage` only when coop ops are emitted.
+
+5. **Test**: `matmul_coop_f16` — 16×16 f16 matmul, tolerance 5e-2.
 
 ### The 5 Traps of C+5
 

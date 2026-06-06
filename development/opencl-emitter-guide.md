@@ -1,5 +1,11 @@
 # Triton OpenCL Emitter Guide — Parallel Execution
 
+> **Note:** The OpenCL emitter is an **optional debugging aid**. The primary
+> backend path is SPIR-V → Vulkan dispatch (see `vulkan-backend-guide.md`
+> and the `triton-windows-vulkan` / `triton-windows-vulkan-perf` skills).
+> Use the OpenCL emitter when you need human-readable C output for debugging
+> converter correctness.
+
 **Scope:** The parallel OpenCL emitter that maps `linalg` ops directly
 to OpenCL workitems, achieving 253× speedup over the serial emitter for
 elementwise kernels.

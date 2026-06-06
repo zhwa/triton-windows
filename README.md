@@ -33,7 +33,7 @@ GPU result                              ← via vkCmdDispatch
 
 ### Verified Results
 
-9 kernel types, verified on RTX 2080 Ti via native Vulkan compute:
+12 kernel types, verified on RTX 2080 Ti via native Vulkan compute:
 
 | Kernel | What it tests | Error |
 |--------|--------------|-------|
@@ -46,6 +46,9 @@ GPU result                              ← via vkCmdDispatch
 | softmax | `exp(x-max) / sum(exp(x-max))` | 5.59e-09 |
 | matmul | 16×16 matrix multiply | 1.91e-06 |
 | transpose | 16×16 transpose | 0.00 (exact) |
+| vadd_multiblock | Multi-block dispatch (1024 elements, 4 workgroups) | 0.00 (exact) |
+| vadd_65k | Large tensor (65536 elements, 256 workgroups) | 0.00 (exact) |
+| matmul_coop_f16 | Cooperative matrix 16×16 (f16 via tensor cores) | ~1e-3 (f16 precision) |
 
 ---
 
@@ -92,7 +95,7 @@ $env:TRITON_BACKENDS_IN_TREE = "1"
 python third_party/vulkan/test/test_kernels_vulkan.py
 ```
 
-Expected: `Result: 9/9 PASS`
+Expected: `Result: 12/12 PASS`
 
 ---
 
@@ -233,9 +236,11 @@ pointer-heavy IR needs bridge passes first (same approach as IREE and Intel XPU)
 | Unranked → Ranked | `memref<*xT>` → `memref<?xT>` |
 | spirv.target_env | attach capability requirements |
 
-**VulkanizePass** (the key innovation): converts `spirv.func` parameters into
-Vulkan-compatible `spirv.GlobalVariable` with descriptor bindings + push
-constants. Without this, the Vulkan driver crashes at pipeline creation.
+**VulkanizePass** (the key innovation): converts `spirv.func` into a complete
+Vulkan compute shader module. Handles 9 responsibilities: buffer args →
+GlobalVariables with descriptor bindings, WorkgroupId/LocalInvocationId builtins,
+push constants, shared memory promotion, barrier insertion, subgroup reductions,
+cooperative matrix buffer-forwarding, and module/entry-point wrapping.
 
 ---
 
@@ -251,13 +256,13 @@ third_party/vulkan/
 │   ├── Conversion/
 │   │   ├── TritonToLinalg.cpp   # 16 converters (~1700 lines)
 │   │   ├── TritonToLinalgPass.cpp
-│   │   └── PrepareSPIRV.cpp     # 7 bridge passes + VulkanizePass (~750 lines)
+│   │   └── PrepareSPIRV.cpp     # Bridge passes + VulkanizePass + C+ passes (~1600 lines)
 │   └── Runtime/
-│       └── VulkanCompute.cpp    # Vulkan dispatch engine (~520 lines)
+│       └── VulkanCompute.cpp    # Vulkan dispatch engine (~600 lines)
 ├── triton_vulkan.cc             # pybind11 module
 ├── CMakeLists.txt
 └── test/
-    ├── test_kernels_vulkan.py   # 9 Vulkan GPU tests (primary)
+    ├── test_kernels_vulkan.py   # 12 Vulkan GPU tests (primary)
     ├── test_kernels.py          # 14 OpenCL tests (optional)
     └── *.ttir                   # 13 test kernels
 ```
@@ -268,10 +273,21 @@ third_party/vulkan/
 
 | Skill | Content |
 |-------|---------|
-| `triton-windows-vulkan` | 16 converters, 7 bridge passes, 18 traps, VulkanizePass, runtime API |
-| `triton-windows-opencl` | Optional OpenCL debug emitters |
-| `triton-windows-build` | LLVM + Triton build on Windows |
+| `triton-windows-build` | LLVM + Triton build on Windows (MSVC patches, vcvars, build scripts) |
+| `triton-windows-vulkan` | Base backend: 16 converters, 7 bridge passes, VulkanizePass, runtime API |
+| `triton-windows-vulkan-perf` | C+1–C+5 performance roadmap, 17 documented traps, strategy lessons |
 | `triton-windows-dev` | Testing, debugging, profiling |
+| `triton-windows-opencl` | Optional OpenCL debug emitters |
+
+## Development Docs
+
+`development/` has textbook-style deep technical guides:
+
+| Document | Content |
+|----------|---------|
+| `vulkan-backend-guide.md` | Complete 21-section guide: architecture, converters, bridge passes, C+ journey |
+| `intel-xpu-backend-study.md` | Path A vs Path C+ feasibility analysis, Intel XPU backend research |
+| `opencl-emitter-guide.md` | Parallel OpenCL emitter internals (debugging aid, not primary path) |
 
 ## Roadmap
 
@@ -279,12 +295,13 @@ third_party/vulkan/
 |---------|--------|-------------|
 | TTIR→Linalg converters | ✅ | 16 converters: splat, range, broadcast, reduce, matmul, load/store, atomics |
 | SPIR-V bridge passes | ✅ | 7 passes resolving MLIR→SPIR-V gaps (reinterpret_cast, copy, expand_shape, etc.) |
-| Native Vulkan dispatch | ✅ | VulkanizePass + VulkanCompute runtime, 11/11 kernels |
+| Native Vulkan dispatch | ✅ | VulkanizePass + VulkanCompute runtime, 12/12 kernels |
 | WorkgroupId parallel dispatch | ✅ | program_id via SPIR-V WorkgroupId builtin (C+1) |
 | Device-local memory | ✅ | Staging buffers + vkCmdCopyBuffer (C+2) |
 | Shared memory reductions | ✅ | Workgroup storage class + tree reduction + ControlBarrier (C+3) |
-| Subgroup operations | 🔲 | `OpGroupNonUniform*` for fast intra-warp reductions (C+4) |
-| Cooperative matrix | 🔲 | `VK_KHR_cooperative_matrix` for matmul (C+5) |
+| Subgroup operations | ✅ | `OpGroupNonUniform*` for fast intra-warp reductions (C+4) |
+| Cooperative matrix | ✅ | `VK_KHR_cooperative_matrix` + buffer-forwarding for matmul (C+5) |
+| Discrete GPU selection | 🔲 | Prefer `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` (C+6) |
 
 > **Why not TritonGPU → LLVM → SPIR-V (Path A)?** Intel's TTGIR→LLVM is 80%
 > Intel-specific (DPAS, 2D block loads). NVIDIA's is equally PTX-locked (~7K
