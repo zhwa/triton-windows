@@ -1,4 +1,4 @@
-// Phase 2: Softmax: out[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
+// Test: Softmax: out[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
 module {
   tt.func public @softmax_kernel(
       %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {

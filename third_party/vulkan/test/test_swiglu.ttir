@@ -1,4 +1,4 @@
-// Phase 2: SwiGLU activation: out[i] = x[i] * sigmoid(x[i]) * gate[i]
+// Test: SwiGLU activation: out[i] = x[i] * sigmoid(x[i]) * gate[i]
 // sigmoid(x) = 1 / (1 + exp(-x))  =  SiLU(x) * gate
 module {
   tt.func public @swiglu_kernel(

@@ -98,7 +98,12 @@ class VulkanBackend(BaseBackend):
 
     @staticmethod
     def make_memref(mod, metadata, opt):
-        """Lower Linalg/Tensor → MemRef + loops + control flow."""
+        """Lower Linalg/Tensor → MemRef + loops + control flow.
+
+        Inserts ConvertReductionToParallel after bufferize to transform
+        linalg.reduce → parallel tree reduction with shared memory, before
+        the remaining linalg ops are lowered to serial loops.
+        """
         try:
             from triton._C.libtriton import vulkan
         except ImportError:
@@ -106,6 +111,7 @@ class VulkanBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         vulkan.passes.memref.one_shot_bufferize(pm)
+        vulkan.passes.memref.convert_reduction_to_parallel(pm)
         vulkan.passes.memref.convert_linalg_to_loops(pm)
         vulkan.passes.memref.lower_affine(pm)
         vulkan.passes.memref.convert_scf_to_cf(pm)

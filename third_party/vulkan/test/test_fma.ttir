@@ -1,4 +1,4 @@
-// Phase 2: Fused multiply-add: out[i] = a[i] * b[i] + c[i]
+// Test: Fused multiply-add: out[i] = a[i] * b[i] + c[i]
 module {
   tt.func public @fma_kernel(
       %a_ptr: !tt.ptr<f32>, %b_ptr: !tt.ptr<f32>,

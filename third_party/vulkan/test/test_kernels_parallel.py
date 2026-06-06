@@ -1,5 +1,5 @@
 """
-Phase 3 parallel emitter GPU test suite.
+Parallel OpenCL C test suite (workitem-per-element emitter).
 
 Tests the parallel OpenCL path:
   TTIR → make_ttir → make_linalg → make_memref_bufonly → make_opencl_parallel → GPU
@@ -172,7 +172,7 @@ TESTS = [
 
 
 def main():
-    print(f"Phase 3 parallel GPU tests — {device.name}")
+    print(f"Parallel OpenCL GPU tests — {device.name}")
     print(f"{'Kernel':<22} {'Error':>12} {'Tol':>10} {'Status':>8}")
     print("-" * 56)
 

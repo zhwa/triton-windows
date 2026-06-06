@@ -82,10 +82,13 @@ private:
 
     // Buffer management
     struct BufferInfo {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkBuffer buffer = VK_NULL_HANDLE;        // device-local storage buffer
+        VkDeviceMemory memory = VK_NULL_HANDLE;   // device-local memory
+        VkBuffer staging = VK_NULL_HANDLE;        // host-visible staging buffer
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
         size_t size = 0;
         uint32_t binding = 0;
+        bool deviceLocal = false;  // true if buffer uses device-local memory
     };
     std::vector<BufferInfo> buffers_;
 
@@ -102,6 +105,8 @@ private:
     void createCommandPool();
     void destroyShaderState();
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    int32_t findMemoryTypeFallback(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void buildPipeline();
 };
 

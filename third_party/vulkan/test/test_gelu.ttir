@@ -1,4 +1,4 @@
-// Phase 2 test: GELU activation (elementwise with math ops)
+// Test: GELU activation (elementwise with math ops)
 module {
   tt.func public @gelu_kernel(%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %N: i32) {
     %pid = tt.get_program_id x : i32

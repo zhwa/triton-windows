@@ -1,4 +1,4 @@
-// Phase 2 test: elementwise multiply (should work like vector_add)
+// Test: elementwise multiply (should work like vector_add)
 module {
   tt.func public @elementwise_mul(%x_ptr: !tt.ptr<f32>, %y_ptr: !tt.ptr<f32>,
                                    %out_ptr: !tt.ptr<f32>, %N: i32) {

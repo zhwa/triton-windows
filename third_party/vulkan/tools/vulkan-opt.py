@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vulkan-opt: Run MLIR SPIR-V conversion pipeline on input IR.
 
-Phase 0 implementation — wraps mlir-opt and mlir-translate from our LLVM build.
+Vulkan backend CLI tool — wraps mlir-opt and mlir-translate from our LLVM build.
 In later phases this will be replaced by a native C++ tool with custom passes.
 
 Usage:

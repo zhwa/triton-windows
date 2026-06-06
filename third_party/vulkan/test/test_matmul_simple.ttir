@@ -1,4 +1,4 @@
-// Phase 2 test: simple matmul C = A @ B (no accumulator, small tiles)
+// Test: simple matmul C = A @ B (no accumulator, small tiles)
 module {
   tt.func public @matmul_kernel(
       %a_ptr: !tt.ptr<f32>, %b_ptr: !tt.ptr<f32>, %c_ptr: !tt.ptr<f32>,

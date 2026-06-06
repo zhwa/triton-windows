@@ -1,4 +1,4 @@
-// Phase 2: Atomic add — accumulate x[i] into out[0] using atomic_rmw
+// Test: Atomic add — accumulate x[i] into out[0] using atomic_rmw
 module {
   tt.func public @atomic_add_kernel(
       %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {

@@ -275,10 +275,20 @@ third_party/vulkan/
 
 ## Roadmap
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 0–1.5 | ✅ | Backend skeleton, converters, SPIR-V serialization |
-| 2 | ✅ | 14 kernels via OpenCL C (debugging aid) |
-| 3 | ✅ | Parallel OpenCL (253× speedup, debugging aid) |
-| 3.5 | ✅ | **Native Vulkan SPIR-V dispatch (9/9 kernels)** |
-| 4 | 🔲 | TritonGPU → LLVM → SPIR-V (performance, future) |
+| Feature | Status | Description |
+|---------|--------|-------------|
+| TTIR→Linalg converters | ✅ | 16 converters: splat, range, broadcast, reduce, matmul, load/store, atomics |
+| SPIR-V bridge passes | ✅ | 7 passes resolving MLIR→SPIR-V gaps (reinterpret_cast, copy, expand_shape, etc.) |
+| Native Vulkan dispatch | ✅ | VulkanizePass + VulkanCompute runtime, 11/11 kernels |
+| WorkgroupId parallel dispatch | ✅ | program_id via SPIR-V WorkgroupId builtin (C+1) |
+| Device-local memory | ✅ | Staging buffers + vkCmdCopyBuffer (C+2) |
+| Shared memory reductions | ✅ | Workgroup storage class + tree reduction + ControlBarrier (C+3) |
+| Subgroup operations | 🔲 | `OpGroupNonUniform*` for fast intra-warp reductions (C+4) |
+| Cooperative matrix | 🔲 | `VK_KHR_cooperative_matrix` for matmul (C+5) |
+
+> **Why not TritonGPU → LLVM → SPIR-V (Path A)?** Intel's TTGIR→LLVM is 80%
+> Intel-specific (DPAS, 2D block loads). NVIDIA's is equally PTX-locked (~7K
+> lines of inline asm). Forking either requires 3-6 months and the performance
+> features (TMA, async copy, wgmma) don't exist on Turing GPUs. Path C+
+> enhances our working MLIR SPIR-V pipeline with Vulkan features the hardware
+> actually supports. See `development/intel-xpu-backend-study.md` for analysis.

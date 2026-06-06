@@ -1,4 +1,4 @@
-// Test: triton-to-linalg pass (Phase 0.5)
+// Test: triton-to-linalg pass — basic converter verification
 // RUN: triton-opt --triton-to-linalg %s
 
 // tt.splat, tt.make_range, tt.broadcast, tt.expand_dims

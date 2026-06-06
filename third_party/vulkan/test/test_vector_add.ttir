@@ -1,4 +1,4 @@
-// Test: vector_add kernel through triton-to-linalg (Phase 1)
+// Test: vector_add kernel through triton-to-linalg
 // This is the core pattern: splat base_ptr → addptr with offsets → masked load/store
 
 module {

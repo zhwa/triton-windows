@@ -31,6 +31,9 @@
 #include "mlir/Dialect/SPIRV/Transforms/Passes.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Conversion/GPUToSPIRV/GPUToSPIRV.h"
+
 #include "Conversion/TritonToLinalg.h"
 
 #ifdef HAVE_VULKAN_RUNTIME
@@ -53,6 +56,9 @@ void init_triton_vulkan_passes_linalg_to_memref(py::module &&m) {
     mlir::bufferization::OneShotBufferizePassOptions opts;
     opts.bufferizeFunctionBoundaries = true;
     pm.addPass(mlir::bufferization::createOneShotBufferizePass(opts));
+  });
+  m.def("convert_reduction_to_parallel", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::vulkan::createConvertReductionToParallelPass());
   });
   m.def("convert_linalg_to_loops", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::func::FuncOp>(
@@ -90,6 +96,10 @@ void init_triton_vulkan_passes_spirv(py::module &&m) {
   });
   m.def("convert_func_to_spirv", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createConvertFuncToSPIRVPass());
+  });
+  m.def("convert_gpu_to_spirv", [](mlir::PassManager &pm) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        mlir::createConvertGPUToSPIRVPass());
   });
   m.def("fix_alloca_storage_class", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::vulkan::createFixAllocaStorageClassPass());
@@ -138,6 +148,7 @@ void init_triton_vulkan(py::module &&m) {
     mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
     mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
     registry.insert<mlir::spirv::SPIRVDialect>();
+    registry.insert<mlir::gpu::GPUDialect>();
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });

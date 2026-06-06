@@ -9,7 +9,7 @@ class VulkanDriver(DriverBase):
 
     @staticmethod
     def is_active():
-        # Phase 0: always inactive — we're not ready to run kernels yet.
+        # Always inactive — dispatch is handled by VulkanCompute C++ runtime.
         return False
 
     def get_current_target(self):

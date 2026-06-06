@@ -4,16 +4,13 @@
 // Adapted from triton-shared (Microsoft, MIT license).
 // Ported to Triton 3.7.0 APIs.
 //
-// Pipeline: TTIR → Linalg/Tensor/Arith → (later) SPIR-V
+// Pipeline: TTIR → Linalg/Tensor/Arith → MemRef → SPIR-V → Vulkan
 //
-// Phase 0.5 scope:
-//   Converts the core Triton ops that don't require pointer analysis:
-//     tt.splat, tt.make_range, tt.broadcast, tt.expand_dims, tt.trans,
-//     tt.get_program_id, tt.get_num_programs, tt.dot, tt.reduce,
-//     tt.addptr (scalar only), tt.bitcast, tt.reshape
-//
-//   Stubs for complex ops (require PtrAnalysis/MaskAnalysis):
-//     tt.load, tt.store — will be implemented in Phase 1
+// 16 converters:
+//   Core: splat, make_range, broadcast, expand_dims, transpose, reshape,
+//         get_program_id, get_num_programs, dot, reduce, bitcast
+//   Pointer/Memory: addptr (PtrState), load, store, atomic_rmw
+//   Constant: dense splat → linalg.fill
 //
 //===----------------------------------------------------------------------===//
 
@@ -310,7 +307,8 @@ struct GetProgramIDConverter
     assert(axis < LAUNCH_GRID_RANK);
     auto func = op->getParentOfType<FunctionOpInterface>();
     auto numArgs = func.getNumArguments();
-    auto id = func.getArgument(numArgs - LAUNCH_GRID_RANK + axis);
+    // pid args are at numArgs-6..numArgs-4 (local_id is last 3)
+    auto id = func.getArgument(numArgs - 2 * LAUNCH_GRID_RANK + axis);
     rewriter.replaceOp(op, id);
     return success();
   }
@@ -329,8 +327,8 @@ struct GetNumProgramsConverter
     assert(axis < LAUNCH_GRID_RANK);
     auto func = op->getParentOfType<FunctionOpInterface>();
     auto numArgs = func.getNumArguments();
-    // num_programs args come before program_id args
-    auto id = func.getArgument(numArgs - 2 * LAUNCH_GRID_RANK + axis);
+    // num_programs args are at numArgs-9..numArgs-7
+    auto id = func.getArgument(numArgs - 3 * LAUNCH_GRID_RANK + axis);
     rewriter.replaceOp(op, id);
     return success();
   }
@@ -651,13 +649,13 @@ struct DenseConstantConverter
 };
 
 //===----------------------------------------------------------------------===//
-// Pointer / Memory Converters (Phase 1)
+// Pointer / Memory Converters
 //
 // Simplified pointer analysis: handles flat pointer tensors where
 //   ptr_tensor = tt.splat(base_ptr) + tt.addptr(ptr_tensor, offset_tensor)
 // Produces memref.reinterpret_cast from the base pointer + offset.
 //
-// For Phase 1 we handle:
+// Supported:
 //   - Unmasked loads/stores (direct memref.copy / materialize_in_destination)
 //   - Masked loads/stores with continuous masks (subview-based)
 // NOT handled (future):
@@ -1062,7 +1060,7 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
       rewriter.create<memref::CopyOp>(loc, ptr, alloc);
     } else {
       // Masked load: fill with 'other' value first, then copy valid region.
-      // For Phase 1: fill with zero if no 'other' provided, then do full copy.
+      // Fill with zero if no 'other' provided, then do full copy.
       // This is correct for the common case where mask is a bounds check
       // and we're inside the valid region.
       if (other) {
@@ -1097,7 +1095,7 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
         rewriter.create<linalg::FillOp>(loc, ValueRange{zero},
                                         ValueRange{alloc});
       }
-      // Copy from source — for Phase 1, do full copy (mask check is on the
+      // Copy from source — do full copy (mask check is on the
       // producer side). Full MaskAnalysis for subview-based partial copy
       // will come later.
       rewriter.create<memref::CopyOp>(loc, ptr, alloc);
@@ -1148,7 +1146,7 @@ struct StoreConverter : public OpConversionPattern<triton::StoreOp> {
               loc, val, ptr);
       storeOp.setWritable(true);
     } else {
-      // Masked store — for Phase 1, do full store (mask check is on the
+      // Masked store — do full store (mask check is on the
       // producer side). Full MaskAnalysis for subview-based partial store
       // will come later.
       auto storeOp =
@@ -1319,12 +1317,12 @@ void mlir::triton::vulkan::populateTritonToLinalgConversionPatterns(
   // Constants
   patterns.add<DenseConstantConverter>(ctx);
 
-  // Pointer / Memory (Phase 1)
+  // Pointer / Memory
   patterns.add<AddPtrConverter>(ctx);
   patterns.add<LoadConverter>(ctx);
   patterns.add<StoreConverter>(ctx);
 
-  // Atomics (Phase 2) — uses typeConverter for ptr type resolution
+  // Atomics — uses typeConverter for ptr type resolution
   patterns.add<AtomicRMWConverter>(typeConverter, ctx);
 
   // Elementwise arith/math on tensors → linalg.generic

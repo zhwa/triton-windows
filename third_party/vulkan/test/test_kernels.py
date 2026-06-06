@@ -1,5 +1,5 @@
 """
-Phase 2 GPU test suite for the Triton Vulkan/SPIR-V backend.
+Serial OpenCL C test suite for the Triton Vulkan/SPIR-V backend.
 
 Tests 10 kernel types end-to-end:
   TTIR → make_ttir → make_linalg → make_memref → make_opencl → GPU execution
@@ -305,7 +305,7 @@ TESTS = [
 
 
 def main():
-    print(f"Vulkan backend Phase 2 GPU tests — {device.name}")
+    print(f"Vulkan backend serial OpenCL tests — {device.name}")
     print(f"{'Kernel':<22} {'Error':>12} {'Tol':>10} {'Status':>8}")
     print("-" * 56)
 

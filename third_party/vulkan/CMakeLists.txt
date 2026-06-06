@@ -1,10 +1,9 @@
 # Vulkan/SPIR-V backend for Triton
 #
-# Phase 0.5: TritonToLinalg conversion pass
-# Future phases will add:
-#   - TritonToSPIRV conversion passes
-#   - SPIR-V serialization target
-#   - Vulkan runtime launcher
+# Components:
+#   - VulkanTritonToLinalg: 16 converters + bridge passes + VulkanizePass
+#   - VulkanRuntime: Vulkan compute dispatch engine
+#   - TritonVulkan: pybind11 module exposing passes + runtime
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -35,6 +34,7 @@ target_link_libraries(VulkanTritonToLinalg PUBLIC
   MLIRSPIRVConversion
   MLIRSPIRVTransforms
   MLIRTensorDialect
+  MLIRGPUDialect
   MLIRPass
   MLIRTransforms
   MLIRSupport
@@ -92,6 +92,7 @@ add_triton_plugin(TritonVulkan
   MLIRSPIRVDialect
   MLIRSPIRVTransforms
   MLIRMathToSPIRV
+  MLIRGPUToSPIRV
 )
 target_link_libraries(TritonVulkan PRIVATE Python3::Module pybind11::headers)
 if(HAVE_VULKAN_RUNTIME)

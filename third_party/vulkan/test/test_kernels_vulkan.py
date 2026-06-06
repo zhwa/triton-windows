@@ -1,4 +1,4 @@
-"""Phase 3.5 Vulkan SPIR-V dispatch test suite."""
+"""Vulkan SPIR-V dispatch test suite (11 kernels incl. multi-block + parallel reduction)."""
 import os, sys, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 from triton._C.libtriton import ir, passes, vulkan
@@ -17,9 +17,9 @@ def comp(name):
     m = b.make_memref(m, md, o); m = b.make_spirv(m, md, o)
     return b.make_spv(m, md, o), md
 
-def run(spv, md, bufs, pc):
+def run(spv, md, bufs, pc, workgroups=1):
     vc = vulkan.runtime.VulkanCompute()
-    vc.load_shader(spv, md["name"]); vc.set_workgroups(1)
+    vc.load_shader(spv, md["name"]); vc.set_workgroups(workgroups)
     ids = []
     for i, (d, s) in enumerate(bufs):
         bid = vc.create_buffer(i, s); vc.write_buffer(bid, d); ids.append(bid)
@@ -30,7 +30,7 @@ def run(spv, md, bufs, pc):
 def read(vc, bid, n):
     o = np.zeros(n, np.float32); vc.read_buffer(bid, o); return o
 
-PC = [N, 1, 1, 1, 0, 0, 0]
+PC = [N, 1, 1, 1]  # push constants: N, num_programs(1,1,1) — pid from WorkgroupId
 results = []
 
 # vector_add
@@ -73,15 +73,27 @@ results.append(("softmax", np.max(np.abs(read(vc,ids[1],N) - (ex/np.sum(ex)).ast
 
 # matmul
 A, B = np.random.randn(256).astype(np.float32), np.random.randn(256).astype(np.float32)
-vc, ids = run(*comp("test_matmul_simple"), [(A,256*4),(B,256*4),(np.zeros(256,np.float32),256*4)], [16,16,16,1,1,1,0,0,0])
+vc, ids = run(*comp("test_matmul_simple"), [(A,256*4),(B,256*4),(np.zeros(256,np.float32),256*4)], [16,16,16,1,1,1])
 results.append(("matmul_16x16", np.max(np.abs(read(vc,ids[2],256).reshape(16,16) - A.reshape(16,16)@B.reshape(16,16))), 1e-4))
 
 # transpose
 x = np.random.randn(256).astype(np.float32)
-vc, ids = run(*comp("test_transpose"), [(x,256*4),(np.zeros(256,np.float32),256*4)], [16,16,1,1,1,0,0,0])
+vc, ids = run(*comp("test_transpose"), [(x,256*4),(np.zeros(256,np.float32),256*4)], [16,16,1,1,1])
 results.append(("transpose", np.max(np.abs(read(vc,ids[1],256) - x.reshape(16,16).T.flatten())), 1e-6))
 
-print("Phase 3.5 Vulkan SPIR-V dispatch — " + vulkan.runtime.VulkanCompute().device_name())
+# multi-block vector_add: 1024 elements = 4 workgroups of BLOCK_SIZE=256
+N_MB = 1024; NB = 4
+x_mb, y_mb = np.random.randn(N_MB).astype(np.float32), np.random.randn(N_MB).astype(np.float32)
+vc, ids = run(*comp("test_vector_add"), [(x_mb,N_MB*4),(y_mb,N_MB*4),(np.zeros(N_MB,np.float32),N_MB*4)], [N_MB, NB, 1, 1], workgroups=NB)
+results.append(("vadd_multiblock", np.max(np.abs(read(vc,ids[2],N_MB) - (x_mb+y_mb))), 1e-6))
+
+# large-N vector_add: 65536 elements = 256 workgroups, exercises device-local staging
+N_LG = 65536; NB_LG = N_LG // 256
+x_lg, y_lg = np.random.randn(N_LG).astype(np.float32), np.random.randn(N_LG).astype(np.float32)
+vc, ids = run(*comp("test_vector_add"), [(x_lg,N_LG*4),(y_lg,N_LG*4),(np.zeros(N_LG,np.float32),N_LG*4)], [N_LG, NB_LG, 1, 1], workgroups=NB_LG)
+results.append(("vadd_65k", np.max(np.abs(read(vc,ids[2],N_LG) - (x_lg+y_lg))), 1e-6))
+
+print("Vulkan SPIR-V dispatch (C+3: shared memory) — " + vulkan.runtime.VulkanCompute().device_name())
 print(f"{'Kernel':<20s} {'Error':>12s} {'Tol':>10s} {'Status':>8s}")
 print("-" * 54)
 passed = 0

@@ -1,4 +1,4 @@
-// Phase 2 test: transpose — out[j,i] = x[i,j]
+// Test: transpose — out[j,i] = x[i,j]
 // Simple: load 16x16, transpose, store
 // Uses flat 1D addressing to avoid 2D pointer patterns
 module {

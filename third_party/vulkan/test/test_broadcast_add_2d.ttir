@@ -1,4 +1,4 @@
-// Phase 2 test: true 2D broadcast add — x[M,N] + bias[N] → out[M,N]
+// Test: true 2D broadcast add — x[M,N] + bias[N] → out[M,N]
 // Uses expand_dims + broadcast to create 2D pointer tensors.
 // M=4 rows, N=8 cols — small sizes to verify correctness.
 module {

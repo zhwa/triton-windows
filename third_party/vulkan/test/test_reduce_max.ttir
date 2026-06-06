@@ -1,4 +1,4 @@
-// Phase 2: Reduce max: out = max(x[0..256])
+// Test: Reduce max: out = max(x[0..256])
 module {
   tt.func public @reduce_max_kernel(
       %x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32) {

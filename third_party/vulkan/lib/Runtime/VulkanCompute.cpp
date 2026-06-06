@@ -147,34 +147,81 @@ size_t VulkanCompute::createBuffer(uint32_t binding, size_t sizeBytes) {
     info.binding = binding;
     info.size = sizeBytes;
 
-    // Create buffer
+    // Try device-local memory for the storage buffer (fast VRAM on discrete GPUs).
+    // The buffer needs TRANSFER_DST (for writeBuffer) and TRANSFER_SRC (for readBuffer).
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = sizeBytes;
-    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     vkCheck(vkCreateBuffer(device_, &bufferInfo, nullptr, &info.buffer),
             "Failed to create buffer");
 
-    // Get memory requirements
     VkMemoryRequirements memReqs;
     vkGetBufferMemoryRequirements(device_, info.buffer, &memReqs);
 
-    // Allocate host-visible, host-coherent memory
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = findMemoryType(
-        memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+    // Try device-local (non-host-visible) memory first
+    int32_t deviceLocalIdx = findMemoryTypeFallback(
+        memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
-            "Failed to allocate buffer memory");
+    if (deviceLocalIdx >= 0) {
+        // Device-local memory available — use it + create staging buffer
+        info.deviceLocal = true;
 
-    vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
-            "Failed to bind buffer memory");
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReqs.size;
+        allocInfo.memoryTypeIndex = static_cast<uint32_t>(deviceLocalIdx);
+
+        vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
+                "Failed to allocate device-local buffer memory");
+        vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
+                "Failed to bind device-local buffer memory");
+
+        // Create host-visible staging buffer for transfers
+        VkBufferCreateInfo stagingInfo{};
+        stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        stagingInfo.size = sizeBytes;
+        stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        vkCheck(vkCreateBuffer(device_, &stagingInfo, nullptr, &info.staging),
+                "Failed to create staging buffer");
+
+        VkMemoryRequirements stagingReqs;
+        vkGetBufferMemoryRequirements(device_, info.staging, &stagingReqs);
+
+        VkMemoryAllocateInfo stagingAlloc{};
+        stagingAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        stagingAlloc.allocationSize = stagingReqs.size;
+        stagingAlloc.memoryTypeIndex = findMemoryType(
+            stagingReqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        vkCheck(vkAllocateMemory(device_, &stagingAlloc, nullptr, &info.stagingMemory),
+                "Failed to allocate staging buffer memory");
+        vkCheck(vkBindBufferMemory(device_, info.staging, info.stagingMemory, 0),
+                "Failed to bind staging buffer memory");
+    } else {
+        // No device-local memory (integrated GPU) — fall back to host-visible
+        info.deviceLocal = false;
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReqs.size;
+        allocInfo.memoryTypeIndex = findMemoryType(
+            memReqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
+                "Failed to allocate buffer memory");
+        vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
+                "Failed to bind buffer memory");
+    }
 
     size_t index = buffers_.size();
     buffers_.push_back(info);
@@ -190,11 +237,22 @@ void VulkanCompute::writeBuffer(size_t bufferIndex, const void* data, size_t siz
         throw std::runtime_error("Write size exceeds buffer size");
     }
 
-    void* mapped = nullptr;
-    vkCheck(vkMapMemory(device_, buf.memory, 0, sizeBytes, 0, &mapped),
-            "Failed to map buffer memory for write");
-    std::memcpy(mapped, data, sizeBytes);
-    vkUnmapMemory(device_, buf.memory);
+    if (buf.deviceLocal) {
+        // Write to staging buffer, then copy to device-local
+        void* mapped = nullptr;
+        vkCheck(vkMapMemory(device_, buf.stagingMemory, 0, sizeBytes, 0, &mapped),
+                "Failed to map staging buffer for write");
+        std::memcpy(mapped, data, sizeBytes);
+        vkUnmapMemory(device_, buf.stagingMemory);
+        copyBuffer(buf.staging, buf.buffer, sizeBytes);
+    } else {
+        // Direct map (integrated GPU fallback)
+        void* mapped = nullptr;
+        vkCheck(vkMapMemory(device_, buf.memory, 0, sizeBytes, 0, &mapped),
+                "Failed to map buffer memory for write");
+        std::memcpy(mapped, data, sizeBytes);
+        vkUnmapMemory(device_, buf.memory);
+    }
 }
 
 void VulkanCompute::readBuffer(size_t bufferIndex, void* data, size_t sizeBytes) {
@@ -206,11 +264,21 @@ void VulkanCompute::readBuffer(size_t bufferIndex, void* data, size_t sizeBytes)
         throw std::runtime_error("Read size exceeds buffer size");
     }
 
-    void* mapped = nullptr;
-    vkCheck(vkMapMemory(device_, buf.memory, 0, sizeBytes, 0, &mapped),
-            "Failed to map buffer memory for read");
-    std::memcpy(data, mapped, sizeBytes);
-    vkUnmapMemory(device_, buf.memory);
+    if (buf.deviceLocal) {
+        // Copy from device-local to staging, then read
+        copyBuffer(buf.buffer, buf.staging, sizeBytes);
+        void* mapped = nullptr;
+        vkCheck(vkMapMemory(device_, buf.stagingMemory, 0, sizeBytes, 0, &mapped),
+                "Failed to map staging buffer for read");
+        std::memcpy(data, mapped, sizeBytes);
+        vkUnmapMemory(device_, buf.stagingMemory);
+    } else {
+        void* mapped = nullptr;
+        vkCheck(vkMapMemory(device_, buf.memory, 0, sizeBytes, 0, &mapped),
+                "Failed to map buffer memory for read");
+        std::memcpy(data, mapped, sizeBytes);
+        vkUnmapMemory(device_, buf.memory);
+    }
 }
 
 // ============================================================================
@@ -418,6 +486,62 @@ uint32_t VulkanCompute::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlag
     throw std::runtime_error("Failed to find suitable memory type");
 }
 
+int32_t VulkanCompute::findMemoryTypeFallback(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; ++i) {
+        if ((typeFilter & (1 << i)) &&
+            (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            // Skip memory types that are also host-visible — those are the
+            // PCIe BAR region on discrete GPUs, not true device-local VRAM.
+            if (properties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT &&
+                (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                continue;
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+void VulkanCompute::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = commandPool_;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuf;
+    vkCheck(vkAllocateCommandBuffers(device_, &allocInfo, &cmdBuf),
+            "Failed to allocate transfer command buffer");
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkCheck(vkBeginCommandBuffer(cmdBuf, &beginInfo),
+            "Failed to begin transfer command buffer");
+
+    VkBufferCopy copyRegion{};
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion);
+
+    vkCheck(vkEndCommandBuffer(cmdBuf),
+            "Failed to end transfer command buffer");
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    vkCheck(vkQueueSubmit(computeQueue_, 1, &submitInfo, VK_NULL_HANDLE),
+            "Failed to submit transfer command");
+    vkCheck(vkQueueWaitIdle(computeQueue_),
+            "Failed waiting for transfer to complete");
+
+    vkFreeCommandBuffers(device_, commandPool_, 1, &cmdBuf);
+}
+
 void VulkanCompute::resetShaderState() {
     destroyShaderState();
 }
@@ -447,14 +571,16 @@ void VulkanCompute::destroyShaderState() {
         descriptorSetLayout_ = VK_NULL_HANDLE;
     }
 
-    // Destroy buffers
+    // Destroy buffers (device-local + staging)
     for (auto& buf : buffers_) {
-        if (buf.buffer != VK_NULL_HANDLE) {
+        if (buf.staging != VK_NULL_HANDLE)
+            vkDestroyBuffer(device_, buf.staging, nullptr);
+        if (buf.stagingMemory != VK_NULL_HANDLE)
+            vkFreeMemory(device_, buf.stagingMemory, nullptr);
+        if (buf.buffer != VK_NULL_HANDLE)
             vkDestroyBuffer(device_, buf.buffer, nullptr);
-        }
-        if (buf.memory != VK_NULL_HANDLE) {
+        if (buf.memory != VK_NULL_HANDLE)
             vkFreeMemory(device_, buf.memory, nullptr);
-        }
     }
     buffers_.clear();
 

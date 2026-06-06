@@ -28,6 +28,10 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVEnums.h"
+
 #include <string>
 
 using namespace mlir;
@@ -529,6 +533,186 @@ std::unique_ptr<OperationPass<ModuleOp>> createFixAllocaStorageClassPass() {
 }
 
 //===----------------------------------------------------------------------===//
+// ConvertReductionToParallel: Transform linalg.reduce → parallel tree reduce
+//===----------------------------------------------------------------------===//
+
+/// Replaces linalg.reduce with a parallel tree reduction using shared memory
+/// (memref.global with address space 3 → Workgroup) and gpu.barrier for
+/// synchronization. Each workgroup invocation loads one element and
+/// participates in a log2(N) tree reduction.
+///
+/// This pass runs AFTER bufferize but BEFORE linalg-to-loops, so it can
+/// consume linalg.reduce ops directly.
+class ConvertReductionToParallel
+    : public PassWrapper<ConvertReductionToParallel, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertReductionToParallel)
+
+  StringRef getArgument() const override {
+    return "convert-reduction-to-parallel";
+  }
+  StringRef getDescription() const override {
+    return "Convert linalg.reduce to parallel tree reduction with shared memory";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<memref::MemRefDialect, arith::ArithDialect,
+                    scf::SCFDialect, func::FuncDialect>();
+  }
+
+  /// Emit func.call @__vulkan_barrier() as a placeholder.
+  /// VulkanizePass will replace these with spirv.ControlBarrier.
+  void emitBarrier(OpBuilder &builder, Location loc) {
+    builder.create<func::CallOp>(
+        loc, "__vulkan_barrier", TypeRange{}, ValueRange{});
+  }
+
+  /// Ensure the barrier declaration exists in the module.
+  void declareBarrier(ModuleOp moduleOp, OpBuilder &builder) {
+    if (moduleOp.lookupSymbol("__vulkan_barrier"))
+      return;
+    auto loc = moduleOp.getLoc();
+    builder.setInsertionPointToStart(
+        &moduleOp.getBodyRegion().front());
+    auto funcType = builder.getFunctionType({}, {});
+    auto decl = builder.create<func::FuncOp>(
+        loc, "__vulkan_barrier", funcType);
+    decl.setPrivate();
+  }
+
+  void runOnOperation() override {
+    auto moduleOp = getOperation();
+    auto *ctx = &getContext();
+
+    // Collect all linalg.reduce ops first (can't modify while walking)
+    SmallVector<linalg::ReduceOp> reduces;
+    moduleOp.walk([&](linalg::ReduceOp op) { reduces.push_back(op); });
+
+    if (reduces.empty())
+      return;
+
+    // Declare the barrier placeholder function
+    OpBuilder moduleBuilder(ctx);
+    declareBarrier(moduleOp, moduleBuilder);
+
+    if (reduces.empty())
+      return;
+
+    for (auto reduceOp : reduces) {
+      auto func = reduceOp->getParentOfType<func::FuncOp>();
+      if (!func) continue;
+
+      // Get input memref type and block size
+      auto inputMemref = reduceOp.getInputs()[0];
+      auto inputType = dyn_cast<MemRefType>(inputMemref.getType());
+      if (!inputType || inputType.getRank() != 1) continue;
+
+      int64_t blockSize = inputType.getShape()[0];
+      if (ShapedType::isDynamic(blockSize)) continue;
+      // Must be power of 2
+      if (blockSize <= 0 || (blockSize & (blockSize - 1)) != 0) continue;
+
+      auto elemType = inputType.getElementType();
+      auto loc = reduceOp.getLoc();
+      OpBuilder builder(reduceOp);
+
+      // Set module attribute for VulkanizePass to read LocalSize
+      // (func attributes may not survive func-to-spirv conversion)
+      moduleOp->setAttr("vulkan.local_size",
+                         builder.getI64ArrayAttr({blockSize, 1, 1}));
+
+      // Allocate shared memory with address space 3 (Workgroup).
+      // map-memref-spirv-storage-class will map AS 3 → Workgroup.
+      // FixAllocaStorageClassPass only touches StorageBuffer, so this
+      // alloca keeps its Workgroup storage class through conversion.
+      // VulkanizePass will then promote it from function-scope Variable
+      // to module-scope GlobalVariable (required by SPIR-V Workgroup).
+      auto sharedType = MemRefType::get(
+          {blockSize}, elemType, MemRefLayoutAttrInterface{},
+          builder.getI64IntegerAttr(3));
+      auto sharedAlloca = builder.create<memref::AllocaOp>(loc, sharedType);
+      Value sharedRef = sharedAlloca.getResult();
+
+      // Get local_id_x from function args (last arg)
+      auto localIdArg = func.getArgument(func.getNumArguments() - 3);
+      Value tidIdx = builder.create<arith::IndexCastOp>(
+          loc, builder.getIndexType(), localIdArg);
+
+      // Each thread loads one element from input → shared[tid]
+      Value val = builder.create<memref::LoadOp>(
+          loc, inputMemref, tidIdx);
+      builder.create<memref::StoreOp>(
+          loc, val, sharedRef, tidIdx);
+
+      // Barrier: ensure all threads have stored
+      emitBarrier(builder, loc);
+
+      // Tree reduction: stride halving
+      for (int64_t stride = blockSize / 2; stride > 0; stride /= 2) {
+        auto strideConst =
+            builder.create<arith::ConstantIndexOp>(loc, stride);
+        auto cmp = builder.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::slt, tidIdx, strideConst);
+
+        auto ifOp = builder.create<scf::IfOp>(loc, cmp,
+                                               /*withElseRegion=*/false);
+        {
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPointToStart(
+              &ifOp.getThenRegion().front());
+
+          Value a = builder.create<memref::LoadOp>(
+              loc, sharedRef, tidIdx);
+          Value bIdx = builder.create<arith::AddIOp>(
+              loc, tidIdx, strideConst);
+          Value b = builder.create<memref::LoadOp>(
+              loc, sharedRef, bIdx);
+
+          // Clone the reduction combiner from linalg.reduce body
+          Block &combinerBlock = reduceOp.getCombiner().front();
+          IRMapping mapping;
+          mapping.map(combinerBlock.getArgument(0), a);
+          mapping.map(combinerBlock.getArgument(1), b);
+
+          Value result;
+          Operation *terminator = combinerBlock.getTerminator();
+          for (Operation &bodyOp : combinerBlock.getOperations()) {
+            if (&bodyOp == terminator)
+              break;
+            Operation *cloned = builder.clone(bodyOp, mapping);
+            for (unsigned r = 0; r < bodyOp.getNumResults(); r++)
+              mapping.map(bodyOp.getResult(r), cloned->getResult(r));
+          }
+          result = mapping.lookup(terminator->getOperand(0));
+
+          builder.create<memref::StoreOp>(
+              loc, result, sharedRef, tidIdx);
+        }
+
+        emitBarrier(builder, loc);
+      }
+
+      // All threads read shared[0] → write to output
+      // (All threads store the same value; subsequent code may use it)
+      Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+      Value finalVal = builder.create<memref::LoadOp>(
+          loc, sharedRef, zero);
+
+      Value outputMemref = reduceOp.getDpsInits()[0];
+      auto outType = cast<MemRefType>(outputMemref.getType());
+      SmallVector<Value> outIndices;
+      for (int64_t i = 0; i < outType.getRank(); i++)
+        outIndices.push_back(zero);
+      builder.create<memref::StoreOp>(
+          loc, finalVal, outputMemref, outIndices);
+
+      // Erase the original linalg.reduce
+      reduceOp.erase();
+    }
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // VulkanizePass: Convert spirv.func args → GlobalVariables for Vulkan dispatch
 //===----------------------------------------------------------------------===//
 
@@ -629,11 +813,155 @@ public:
     funcOp->remove();
     spirvBody->push_back(funcOp.getOperation());
 
-    // Create push constant struct for scalar args
+    // Promote the shared memory Variable to Workgroup storage class.
+    // ConvertReductionToParallel created a memref.alloca with AS 3 (Workgroup)
+    // which FixAllocaStorageClassPass changed to Function. After SPIR-V
+    // conversion, it's a spirv.Variable Function. We identify it as the
+    // LAST Variable matching the block size (the shared alloca was created
+    // after the load buffer alloca).
+    SmallVector<spirv::VariableOp> sharedVars;
+    if (moduleOp->hasAttr("vulkan.local_size")) {
+      auto lsAttr = moduleOp->getAttrOfType<ArrayAttr>("vulkan.local_size");
+      int64_t blockSize = cast<IntegerAttr>(lsAttr[0]).getInt();
+
+      SmallVector<spirv::VariableOp> candidates;
+      SmallVector<spirv::VariableOp> loadBuffers;
+      funcOp.walk([&](spirv::VariableOp varOp) {
+        auto ptrType = dyn_cast<spirv::PointerType>(varOp.getType());
+        if (!ptrType) return;
+        auto structType = dyn_cast<spirv::StructType>(
+            ptrType.getPointeeType());
+        if (!structType || structType.getNumElements() != 1) return;
+        auto arrayType = dyn_cast<spirv::ArrayType>(
+            structType.getElementType(0));
+        if (!arrayType) return;
+        if (arrayType.getNumElements() == static_cast<unsigned>(blockSize))
+          candidates.push_back(varOp);
+      });
+      // The first matching variable is the load buffer (from tt.load → alloc).
+      // All subsequent matching variables are shared memory (from
+      // ConvertReductionToParallel). Skip the first, promote the rest.
+      for (unsigned i = 1; i < candidates.size(); i++)
+        sharedVars.push_back(candidates[i]);
+    }
+    for (auto varOp : sharedVars) {
+      auto ptrType = cast<spirv::PointerType>(varOp.getType());
+      auto pointeeType = ptrType.getPointeeType();
+      auto workgroupPtrType = spirv::PointerType::get(
+          pointeeType, spirv::StorageClass::Workgroup);
+
+      std::string varName = "__shared_" + std::to_string(
+          interfaceVarRefs.size());
+
+      builder.setInsertionPoint(funcOp);
+      OperationState gvState(loc, spirv::GlobalVariableOp::getOperationName());
+      gvState.addAttribute("sym_name", builder.getStringAttr(varName));
+      gvState.addAttribute("type", TypeAttr::get(workgroupPtrType));
+      auto *gvOp = builder.create(gvState);
+      auto sharedGlobal = cast<spirv::GlobalVariableOp>(gvOp);
+
+      interfaceVarRefs.push_back(
+          FlatSymbolRefAttr::get(ctx, varName));
+
+      // Replace the function-scope Variable with addressof and update
+      // all downstream AccessChain/Load/Store to use Workgroup class
+      builder.setInsertionPointAfter(varOp);
+      auto addrOf = builder.create<spirv::AddressOfOp>(loc, sharedGlobal);
+
+      // Walk users and rebuild AccessChain ops with Workgroup ptr types
+      SmallVector<Operation *> users(varOp->getUsers().begin(),
+                                     varOp->getUsers().end());
+      for (auto *user : users) {
+        if (auto acOp = dyn_cast<spirv::AccessChainOp>(user)) {
+          // Compute new result type: same element type, Workgroup class
+          auto oldResultType = cast<spirv::PointerType>(acOp.getType());
+          auto newResultType = spirv::PointerType::get(
+              oldResultType.getPointeeType(),
+              spirv::StorageClass::Workgroup);
+
+          builder.setInsertionPointAfter(acOp);
+          auto newAC = builder.create<spirv::AccessChainOp>(
+              acOp.getLoc(), newResultType, addrOf, acOp.getIndices());
+
+          // Replace users of the old AccessChain
+          SmallVector<Operation *> acUsers(acOp->getUsers().begin(),
+                                           acOp->getUsers().end());
+          for (auto *acUser : acUsers) {
+            if (auto loadOp = dyn_cast<spirv::LoadOp>(acUser)) {
+              builder.setInsertionPointAfter(loadOp);
+              auto newLoad = builder.create<spirv::LoadOp>(
+                  loadOp.getLoc(), newAC);
+              loadOp.replaceAllUsesWith(newLoad.getOperation());
+              loadOp.erase();
+            } else if (auto storeOp = dyn_cast<spirv::StoreOp>(acUser)) {
+              builder.setInsertionPointAfter(storeOp);
+              builder.create<spirv::StoreOp>(
+                  storeOp.getLoc(), newAC, storeOp.getValue());
+              storeOp.erase();
+            }
+          }
+          acOp.erase();
+        }
+      }
+      varOp.erase();
+    }
+
+    // Split scalar args: last 6 are local_id(3) + program_id(3),
+    // replaced with LocalInvocationId and WorkgroupId builtins.
+    // Convention: [..., num_programs(3), pid(3), local_id(3)]
+    constexpr unsigned NUM_BUILTIN_ARGS = 6; // 3 pid + 3 local_id
+    constexpr unsigned NUM_PID_ARGS = 3;
+    constexpr unsigned NUM_LID_ARGS = 3;
+    SmallVector<unsigned> pushConstArgIndices;
+    SmallVector<unsigned> pidArgIndices;
+    SmallVector<unsigned> lidArgIndices;
+    if (scalarArgIndices.size() < NUM_BUILTIN_ARGS) {
+      funcOp.emitError("Expected at least 6 scalar args for program_id + local_id");
+      return signalPassFailure();
+    }
+    for (unsigned i = 0; i < scalarArgIndices.size(); i++) {
+      unsigned fromEnd = scalarArgIndices.size() - i;
+      if (fromEnd <= NUM_LID_ARGS)
+        lidArgIndices.push_back(scalarArgIndices[i]);
+      else if (fromEnd <= NUM_LID_ARGS + NUM_PID_ARGS)
+        pidArgIndices.push_back(scalarArgIndices[i]);
+      else
+        pushConstArgIndices.push_back(scalarArgIndices[i]);
+    }
+
+    // Create WorkgroupId builtin variable (provides program_id via dispatch).
+    auto vec3i32 = VectorType::get({3}, builder.getI32Type());
+    auto inputPtrType = spirv::PointerType::get(
+        vec3i32, spirv::StorageClass::Input);
+
+    builder.setInsertionPoint(funcOp);
+    OperationState wgState(loc, spirv::GlobalVariableOp::getOperationName());
+    wgState.addAttribute("sym_name",
+                         builder.getStringAttr("__builtin_workgroup_id"));
+    wgState.addAttribute("type", TypeAttr::get(inputPtrType));
+    wgState.addAttribute("built_in", builder.getStringAttr("WorkgroupId"));
+    auto *wgOp = builder.create(wgState);
+    auto workgroupIdVar = cast<spirv::GlobalVariableOp>(wgOp);
+    interfaceVarRefs.push_back(
+        FlatSymbolRefAttr::get(ctx, "__builtin_workgroup_id"));
+
+    // Create LocalInvocationId builtin variable (thread ID within workgroup)
+    OperationState lidState(loc, spirv::GlobalVariableOp::getOperationName());
+    lidState.addAttribute("sym_name",
+                          builder.getStringAttr("__builtin_local_invocation_id"));
+    lidState.addAttribute("type", TypeAttr::get(inputPtrType));
+    lidState.addAttribute("built_in",
+                          builder.getStringAttr("LocalInvocationId"));
+    auto *lidOp = builder.create(lidState);
+    auto localInvocationIdVar = cast<spirv::GlobalVariableOp>(lidOp);
+    interfaceVarRefs.push_back(
+        FlatSymbolRefAttr::get(ctx, "__builtin_local_invocation_id"));
+
+    // Create push constant struct for non-pid scalar args only
     spirv::GlobalVariableOp pushConstVar;
-    if (!scalarArgIndices.empty()) {
+    if (!pushConstArgIndices.empty()) {
       SmallVector<Type> memberTypes;
-      for (auto idx : scalarArgIndices)
+      for (auto idx : pushConstArgIndices)
         memberTypes.push_back(funcType.getInput(idx));
 
       // Create struct with Offset decorations based on actual type sizes
@@ -665,7 +993,7 @@ public:
           FlatSymbolRefAttr::get(ctx, pushConstVar.getSymName()));
     }
 
-    // Replace arg uses: buffer args → addressof, scalar args → push constant access
+    // Replace arg uses: buffer args → addressof
     builder.setInsertionPointToStart(&entryBlock);
     for (unsigned i = 0; i < bufferArgIndices.size(); i++) {
       unsigned argIdx = bufferArgIndices[i];
@@ -675,11 +1003,11 @@ public:
       arg.replaceAllUsesWith(addrOf.getResult());
     }
 
-    // Replace scalar args with push constant loads
+    // Replace push constant args (non-pid scalars)
     if (pushConstVar) {
       auto pcAddrOf = builder.create<spirv::AddressOfOp>(loc, pushConstVar);
-      for (unsigned i = 0; i < scalarArgIndices.size(); i++) {
-        unsigned argIdx = scalarArgIndices[i];
+      for (unsigned i = 0; i < pushConstArgIndices.size(); i++) {
+        unsigned argIdx = pushConstArgIndices[i];
         auto arg = entryBlock.getArgument(argIdx);
         auto memberIdx = builder.create<spirv::ConstantOp>(
             loc, builder.getI32Type(), builder.getI32IntegerAttr(i));
@@ -692,7 +1020,63 @@ public:
       }
     }
 
-    // Build new function type with NO args (all via globals/push constants)
+    // Replace program_id args with WorkgroupId builtin components
+    {
+      auto wgAddrOf = builder.create<spirv::AddressOfOp>(loc, workgroupIdVar);
+      auto wgLoaded = builder.create<spirv::LoadOp>(loc, wgAddrOf);
+      for (unsigned i = 0; i < pidArgIndices.size(); i++) {
+        unsigned argIdx = pidArgIndices[i];
+        auto arg = entryBlock.getArgument(argIdx);
+        auto extracted = builder.create<spirv::CompositeExtractOp>(
+            loc, builder.getI32Type(), wgLoaded,
+            builder.getI32ArrayAttr({static_cast<int32_t>(i)}));
+        arg.replaceAllUsesWith(extracted);
+      }
+    }
+
+    // Replace local_id args with LocalInvocationId builtin components
+    {
+      auto lidAddrOf = builder.create<spirv::AddressOfOp>(
+          loc, localInvocationIdVar);
+      auto lidLoaded = builder.create<spirv::LoadOp>(loc, lidAddrOf);
+      for (unsigned i = 0; i < lidArgIndices.size(); i++) {
+        unsigned argIdx = lidArgIndices[i];
+        auto arg = entryBlock.getArgument(argIdx);
+        auto extracted = builder.create<spirv::CompositeExtractOp>(
+            loc, builder.getI32Type(), lidLoaded,
+            builder.getI32ArrayAttr({static_cast<int32_t>(i)}));
+        arg.replaceAllUsesWith(extracted);
+      }
+    }
+
+    // Replace barrier placeholder calls with spirv.ControlBarrier
+    SmallVector<spirv::FunctionCallOp> barrierCalls;
+    funcOp.walk([&](spirv::FunctionCallOp callOp) {
+      if (callOp.getCallee() == "__vulkan_barrier")
+        barrierCalls.push_back(callOp);
+    });
+    for (auto callOp : barrierCalls) {
+      OpBuilder barrierBuilder(callOp);
+      OperationState state(callOp.getLoc(),
+                           spirv::ControlBarrierOp::getOperationName());
+      state.addAttribute("execution_scope",
+          spirv::ScopeAttr::get(ctx, spirv::Scope::Workgroup));
+      state.addAttribute("memory_scope",
+          spirv::ScopeAttr::get(ctx, spirv::Scope::Workgroup));
+      state.addAttribute("memory_semantics",
+          spirv::MemorySemanticsAttr::get(
+              ctx, spirv::MemorySemantics::WorkgroupMemory |
+                   spirv::MemorySemantics::AcquireRelease));
+      barrierBuilder.create(state);
+      callOp.erase();
+    }
+    // Also remove the barrier function declaration from the spirv.module
+    if (auto barrierDecl = dyn_cast_or_null<spirv::FuncOp>(
+            spirvModule.lookupSymbol("__vulkan_barrier"))) {
+      barrierDecl.erase();
+    }
+
+    // Build new function type with NO args (all via globals/push constants/builtins)
     auto newFuncType = FunctionType::get(ctx, {}, {});
     funcOp.setFunctionType(newFuncType);
 
@@ -711,13 +1095,21 @@ public:
       builder.create(state);
     }
 
-    // Add ExecutionMode: LocalSize 1,1,1
+    // Add ExecutionMode: LocalSize from function attribute or default 1,1,1
     {
+      SmallVector<int32_t, 3> localSize = {1, 1, 1};
+      // Check if the original func had vulkan.local_size attribute
+      // (set by ConvertReductionToParallel for reduction kernels)
+      if (auto lsAttr = moduleOp->getAttrOfType<ArrayAttr>("vulkan.local_size")) {
+        for (unsigned i = 0; i < 3 && i < lsAttr.size(); i++)
+          localSize[i] = cast<IntegerAttr>(lsAttr[i]).getInt();
+      }
+
       OperationState state(loc, spirv::ExecutionModeOp::getOperationName());
       state.addAttribute("fn", SymbolRefAttr::get(ctx, kernelName));
       state.addAttribute("execution_mode",
           spirv::ExecutionModeAttr::get(ctx, spirv::ExecutionMode::LocalSize));
-      state.addAttribute("values", builder.getI32ArrayAttr({1, 1, 1}));
+      state.addAttribute("values", builder.getI32ArrayAttr(localSize));
       builder.create(state);
     }
 
@@ -732,6 +1124,10 @@ std::unique_ptr<OperationPass<ModuleOp>> createVulkanizePass() {
 
 std::unique_ptr<OperationPass<ModuleOp>> createPrepareSPIRVPass() {
   return std::make_unique<PrepareSPIRVPass>();
+}
+
+std::unique_ptr<OperationPass<ModuleOp>> createConvertReductionToParallelPass() {
+  return std::make_unique<ConvertReductionToParallel>();
 }
 
 } // namespace vulkan

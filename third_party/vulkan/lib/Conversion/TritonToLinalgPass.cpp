@@ -93,11 +93,12 @@ public:
 
 static constexpr uint32_t LAUNCH_GRID_RANK = 3; // X, Y, Z
 static constexpr unsigned TRITON_PROGRAM_INFO_ARG_COUNT =
-    LAUNCH_GRID_RANK * 2; // num_programs(3) + program_id(3)
+    LAUNCH_GRID_RANK * 3; // num_programs(3) + program_id(3) + local_id(3)
 
-/// Add 6 i32 args to a triton::FuncOp: num_programs (x,y,z) + program_id
-/// (x,y,z). GetProgramIDConverter and GetNumProgramsConverter extract from
-/// these.
+/// Add 9 i32 args to a triton::FuncOp: num_programs (x,y,z) + program_id
+/// (x,y,z) + local_id (x,y,z). GetProgramIDConverter and
+/// GetNumProgramsConverter extract from these. VulkanizePass maps
+/// program_id → WorkgroupId and local_id → LocalInvocationId.
 static void addProgramInfo(triton::FuncOp func) {
   OpBuilder b(func);
   auto origType = func.getFunctionType();

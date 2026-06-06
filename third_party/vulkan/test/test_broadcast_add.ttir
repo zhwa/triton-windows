@@ -1,4 +1,4 @@
-// Phase 2 test: broadcast add — x[0..32] + bias[0..32] → out[0..32]
+// Test: broadcast add — x[0..32] + bias[0..32] → out[0..32]
 // Tests 1D elementwise addition with two separate loads (different pointers).
 // A true 2D broadcast (expand_dims + broadcast) requires multi-dim pointer
 // support in TritonToLinalg; this tests the elementwise + dual-load pattern.

@@ -19,6 +19,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createFixAllocaStorageClassPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createVulkanizePass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createConvertReductionToParallelPass();
+
 void populateTritonToLinalgConversionPatterns(TypeConverter &typeConverter,
                                               RewritePatternSet &patterns,
                                               unsigned int launchGridRank);
