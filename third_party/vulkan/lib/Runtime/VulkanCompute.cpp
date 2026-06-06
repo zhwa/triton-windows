@@ -35,7 +35,7 @@ void VulkanCompute::initInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "VulkanCompute";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    appInfo.apiVersion = VK_API_VERSION_1_1;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -71,6 +71,16 @@ void VulkanCompute::pickPhysicalDevice() {
                 VkPhysicalDeviceProperties props;
                 vkGetPhysicalDeviceProperties(dev, &props);
                 deviceName_ = props.deviceName;
+
+                // Query subgroup size (Vulkan 1.1+)
+                VkPhysicalDeviceSubgroupProperties subgroupProps{};
+                subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+                VkPhysicalDeviceProperties2 props2{};
+                props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+                props2.pNext = &subgroupProps;
+                vkGetPhysicalDeviceProperties2(dev, &props2);
+                subgroupSize_ = subgroupProps.subgroupSize;
+
                 return;
             }
         }
@@ -87,10 +97,35 @@ void VulkanCompute::createLogicalDevice() {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
+    // Enable device extensions for cooperative matrix and 16-bit storage
+    std::vector<const char*> deviceExtensions = {
+        "VK_KHR_cooperative_matrix",
+        "VK_KHR_16bit_storage",
+        "VK_KHR_shader_float16_int8",
+    };
+
+    // Enable cooperative matrix + f16 features
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopFeatures{};
+    coopFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+    coopFeatures.cooperativeMatrix = VK_TRUE;
+
+    VkPhysicalDevice16BitStorageFeatures f16Features{};
+    f16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+    f16Features.storageBuffer16BitAccess = VK_TRUE;
+    f16Features.pNext = &coopFeatures;
+
+    VkPhysicalDeviceShaderFloat16Int8Features f16ShaderFeatures{};
+    f16ShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    f16ShaderFeatures.shaderFloat16 = VK_TRUE;
+    f16ShaderFeatures.pNext = &f16Features;
+
     VkDeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
+    deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    deviceCreateInfo.pNext = &f16ShaderFeatures;
 
     vkCheck(vkCreateDevice(physicalDevice_, &deviceCreateInfo, nullptr, &device_),
             "Failed to create logical device");
@@ -470,6 +505,10 @@ void VulkanCompute::dispatch() {
 
 std::string VulkanCompute::getDeviceName() const {
     return deviceName_;
+}
+
+uint32_t VulkanCompute::getSubgroupSize() const {
+    return subgroupSize_;
 }
 
 uint32_t VulkanCompute::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

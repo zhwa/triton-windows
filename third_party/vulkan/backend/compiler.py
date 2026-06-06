@@ -112,6 +112,7 @@ class VulkanBackend(BaseBackend):
         pm.enable_debug()
         vulkan.passes.memref.one_shot_bufferize(pm)
         vulkan.passes.memref.convert_reduction_to_parallel(pm)
+        vulkan.passes.memref.convert_matmul_to_cooperative(pm)
         vulkan.passes.memref.convert_linalg_to_loops(pm)
         vulkan.passes.memref.lower_affine(pm)
         vulkan.passes.memref.convert_scf_to_cf(pm)

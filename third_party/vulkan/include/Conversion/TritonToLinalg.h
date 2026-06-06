@@ -21,6 +21,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createVulkanizePass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createConvertReductionToParallelPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createConvertMatmulToCooperativePass();
+
 void populateTritonToLinalgConversionPatterns(TypeConverter &typeConverter,
                                               RewritePatternSet &patterns,
                                               unsigned int launchGridRank);

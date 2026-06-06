@@ -58,6 +58,9 @@ public:
     /// Get device name for display.
     std::string getDeviceName() const;
 
+    /// Get subgroup (warp) size for the device.
+    uint32_t getSubgroupSize() const;
+
     /// Clean up per-shader state (buffers, pipeline) for reuse.
     void resetShaderState();
 
@@ -70,6 +73,7 @@ private:
     uint32_t computeQueueFamily_ = 0;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::string deviceName_;
+    uint32_t subgroupSize_ = 32;  // default, queried at init
 
     // Per-shader state
     VkShaderModule shaderModule_ = VK_NULL_HANDLE;

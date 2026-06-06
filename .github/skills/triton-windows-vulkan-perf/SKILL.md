@@ -1,7 +1,7 @@
 ---
 name: triton-windows-vulkan-perf
-description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, and 10 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the shared memory promotion pipeline, or planning C+4/C+5 work."
-argument-hint: "workgroup-id | device-local | shared-memory | barriers | traps | strategy"
+description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, and 12 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the shared memory promotion pipeline, or planning future work."
+argument-hint: "workgroup-id | device-local | shared-memory | barriers | subgroup | traps | strategy"
 user-invocable: true
 ---
 
@@ -23,9 +23,8 @@ at a time. Every step is a working commit with 11/11 tests passing.
 |------|---------|--------------|-----------|--------|
 | C+1 | WorkgroupId for program_id | PrepareSPIRV.cpp, test | 1 | ✅ |
 | C+2 | Device-local memory | VulkanCompute.{h,cpp} | 1 | ✅ |
-| C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc | 8 | ✅ |
-| C+4 | Subgroup operations | (future) | — | 🔲 |
-| C+5 | Cooperative matrix | (future) | — | 🔲 |
+| C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc, CMakeLists.txt | 8 | ✅ |
+| C+4 | Subgroup operations | PrepareSPIRV.cpp, VulkanCompute.{h,cpp}, triton_vulkan.cc | 2 | ✅ |
 
 ---
 
@@ -34,29 +33,26 @@ at a time. Every step is a working commit with 11/11 tests passing.
 **Goal:** Replace push-constant `program_id` with SPIR-V `WorkgroupId` builtin
 so all blocks execute in a single `vkCmdDispatch(num_blocks, 1, 1)`.
 
-### What Changed
+### How to Reproduce
 
-| Component | Change |
-|-----------|--------|
-| VulkanizePass | Last 3 scalar args → `__builtin_workgroup_id` GlobalVariable with `BuiltIn WorkgroupId`, read via `spirv.CompositeExtract` |
-| Push constants | Reduced by 12 bytes (3×i32 pid removed) |
-| Test | `vadd_multiblock`: 1024 elements across 4 parallel workgroups |
+1. In `PrepareSPIRV.cpp` VulkanizePass, split scalar args: last 3 are
+   program_id → replaced with `__builtin_workgroup_id` GlobalVariable
+   (`BuiltIn WorkgroupId`), read via `spirv.CompositeExtract`
+2. Remaining scalars (N, num_programs) → push constants (12 bytes less)
+3. Use `emitError() + signalPassFailure()`, NOT `assert()` (trap C1-1)
+4. Add test: `vadd_multiblock` — 1024 elements, 4 workgroups
 
-### Arg Layout (after C+1)
+### Arg Layout After C+1
 
 ```
-func.func @kernel(%ptr: memref<*xf32>, ..., %N: i32,
-                  %num_progs_x: i32, %num_progs_y: i32, %num_progs_z: i32,
-                  %pid_x: i32, %pid_y: i32, %pid_z: i32)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                  replaced by WorkgroupId builtin
+func @kernel(%ptrs..., %N, %num_progs(3), %pid(3))
+                                         ^^^^^^^^ → WorkgroupId builtin
+Push constants: [N, num_progs_x, num_progs_y, num_progs_z]  (no pid)
 ```
-
-Push constants: `[N, num_programs(3)]` — no pid.
 
 ### Trap C1-1: assert → emitError
 
-Using `assert` in an MLIR pass aborts in debug builds, is no-op in release.
+`assert` in an MLIR pass aborts in debug builds, no-op in release.
 Always use `funcOp.emitError(...); return signalPassFailure();`.
 
 ---
@@ -65,112 +61,197 @@ Always use `funcOp.emitError(...); return signalPassFailure();`.
 
 **Goal:** Use device-local VRAM instead of PCIe BAR memory for storage buffers.
 
-### What Changed
+### How to Reproduce
 
-| Component | Change |
-|-----------|--------|
-| `BufferInfo` struct | New fields: `staging`, `stagingMemory`, `deviceLocal` flag |
-| `createBuffer` | Tries DEVICE_LOCAL VRAM; creates host-visible staging buffer alongside; falls back on integrated GPUs |
-| `writeBuffer` | Host → staging (memcpy) → device (vkCmdCopyBuffer) |
-| `readBuffer` | Device → staging (vkCmdCopyBuffer) → host (memcpy) |
-| `copyBuffer` (new) | One-shot command buffer for vkCmdCopyBuffer |
-| `findMemoryTypeFallback` (new) | Returns -1 instead of throwing; skips BAR memory |
-| `destroyShaderState` | Cleans up staging buffers too |
-| Test | `vadd_65k`: 65536 elements across 256 workgroups |
+1. `VulkanCompute.h`: Add `staging`, `stagingMemory`, `deviceLocal` fields to
+   `BufferInfo`; add `findMemoryTypeFallback()` and `copyBuffer()` methods
+2. `createBuffer()`: Try `DEVICE_LOCAL` (non-host-visible) memory first;
+   create host-visible staging buffer alongside; fall back on integrated GPUs
+3. `writeBuffer()`: Host → staging (memcpy) → device (`vkCmdCopyBuffer`)
+4. `readBuffer()`: Device → staging (`vkCmdCopyBuffer`) → host (memcpy)
+5. `destroyShaderState()`: Clean up staging buffers
+6. Add test: `vadd_65k` — 65536 elements, 256 workgroups
 
 ### Trap C2-1: BAR Memory Masquerades as VRAM
 
-On discrete GPUs, there's a ~256MB memory type that is BOTH `DEVICE_LOCAL`
-and `HOST_VISIBLE` — the PCIe BAR, not true VRAM. `findMemoryTypeFallback`
-explicitly skips types with both flags to find the large non-host-visible heap.
-
-Many Vulkan tutorials get this wrong.
+On discrete GPUs, a ~256MB memory type is BOTH `DEVICE_LOCAL` AND
+`HOST_VISIBLE` — the PCIe BAR, not true VRAM. `findMemoryTypeFallback`
+must skip types with both flags. Many Vulkan tutorials get this wrong.
 
 ---
 
-## 4. C+3: Workgroup Shared Memory (Most Complex)
+## 4. C+3: Workgroup Shared Memory (Most Complex Step)
 
 **Goal:** Parallel tree reductions using SPIR-V Workgroup shared memory +
 `spirv.ControlBarrier` for synchronization.
 
-### Architecture
+### How to Reproduce
+
+**Step 1: Add local_id args.** In `TritonToLinalgPass.cpp`, change
+`PROGRAM_INFO_ARG_COUNT` from 6 to 9 (add 3 local_id args). Fix arg indices:
+- `GetProgramIDConverter`: `numArgs - 2*3 + axis` (was `numArgs - 3 + axis`)
+- `GetNumProgramsConverter`: `numArgs - 3*3 + axis` (was `numArgs - 2*3 + axis`)
+
+**Step 2: Create `ConvertReductionToParallel` pass** (PrepareSPIRV.cpp).
+Runs AFTER bufferize, BEFORE linalg-to-loops. For each `linalg.reduce`:
+1. Set `vulkan.local_size = [blockSize, 1, 1]` on module (not function!)
+2. Create `memref.alloca` with address space 3 (→ Workgroup after mapping)
+3. Each thread: load input[tid] → shared[tid]
+4. Emit barrier: `func.call @__vulkan_barrier()` (placeholder)
+5. Tree reduction loop (stride halving): load/combine/store + barrier per stride
+6. All threads read shared[0] → write to output
+7. Erase the `linalg.reduce`
+
+**Step 3: Register the pass** in `triton_vulkan.cc` and call in
+`compiler.py` (`convert_reduction_to_parallel` after `one_shot_bufferize`).
+
+**Step 4: Update VulkanizePass** to handle new features:
+- Detect Workgroup-bound Variables by matching `spirv.array<N>` against
+  `vulkan.local_size`. First match = load buffer (skip), rest = shared
+- Promote each to module-scope `spirv.GlobalVariable Workgroup`
+- Rebuild ALL downstream AccessChain/Load/Store with Workgroup ptr types
+- Replace `spirv.FunctionCall @__vulkan_barrier` → `spirv.ControlBarrier`
+- Add `__builtin_local_invocation_id` (BuiltIn LocalInvocationId)
+- Read `vulkan.local_size` for `ExecutionMode LocalSize`
+
+### The IR Flow (What Happens to Shared Memory)
 
 ```
-linalg.reduce                        (consumed by ConvertReductionToParallel)
+linalg.reduce                        → consumed by ConvertReductionToParallel
     ↓
 memref.alloca(AS 3) + scf.if + func.call @__vulkan_barrier
-    ↓ bufferize already done; linalg-to-loops + scf-to-cf + canonicalize
+    ↓ linalg-to-loops + scf-to-cf
 cf.* + memref.load/store + func.call @__vulkan_barrier
-    ↓ map_storage_class: AS 3 → Workgroup
+    ↓ map_storage_class (AS 3 → Workgroup)
 memref<256xf32, #spirv.storage_class<Workgroup>>
-    ↓ fix_alloca_storage_class: ALL allocas → Function (including shared!)
+    ↓ fix_alloca_storage_class (ALL allocas → Function!)
 memref<256xf32, #spirv.storage_class<Function>>
-    ↓ convert-memref-to-spirv: alloca → spirv.Variable Function
+    ↓ convert-memref-to-spirv
 spirv.Variable : !spirv.ptr<struct<array<256 x f32>>, Function>
-    ↓ convert-func-to-spirv: func.func → spirv.func
+    ↓ convert-func-to-spirv
 spirv.FunctionCall @__vulkan_barrier()
-    ↓ VulkanizePass:
-      1. Promote shared Variable → Workgroup GlobalVariable
-      2. Rebuild all AccessChain/Load/Store with Workgroup ptr types
-      3. Replace @__vulkan_barrier calls → spirv.ControlBarrier
+    ↓ VulkanizePass
+      1. Promote Variable → Workgroup GlobalVariable (rebuild types)
+      2. Replace @__vulkan_barrier → spirv.ControlBarrier
+      3. Add builtins (WorkgroupId, LocalInvocationId)
 ```
 
-### What Changed
+### The 8 Traps (in the order you will hit them)
 
-| Component | Change |
-|-----------|--------|
-| `TritonToLinalgPass.cpp` | 9 program info args: num_programs(3) + pid(3) + local_id(3) |
-| `TritonToLinalg.cpp` | `GetProgramIDConverter`: numArgs-6. `GetNumProgramsConverter`: numArgs-9 |
-| `ConvertReductionToParallel` (new pass) | linalg.reduce → parallel tree reduction with shared alloca(AS 3) + barrier placeholders |
-| VulkanizePass | LocalInvocationId builtin, configurable LocalSize, shared Variable→Workgroup GlobalVariable, barrier replacement |
-| `compiler.py` | `convert_reduction_to_parallel` after bufferize, before linalg-to-loops |
-| `triton_vulkan.cc` | Register new pass |
+| # | What Goes Wrong | Why | Fix |
+|---|----------------|-----|-----|
+| C3-8 | MSVC: cascading `auto` failures | Missing `#include "Linalg/IR/Linalg.h"` in PrepareSPIRV.cpp | Include ALL used dialect headers first |
+| C3-6 | Existing converters read wrong args | Adding 3 args shifts indices | Fix GetProgramID (numArgs-6) and GetNumPrograms (numArgs-9) |
+| C3-1 | `gpu.barrier` silently ignored | `convert-gpu-to-spirv` doesn't work on `func.func` | Use `func.call @__vulkan_barrier` placeholder |
+| C3-2 | `spirv.ControlBarrier` blocks func conversion | `convert-func-to-spirv` rejects non-func-dialect ops | Defer barrier creation to VulkanizePass |
+| C3-3 | Shared alloca becomes Function class | `convert-memref-to-spirv` forces ALL Variables to Function | Detect by array size in VulkanizePass |
+| C3-4 | Verifier rejects function-scope Workgroup Variable | SPIR-V spec: Workgroup must be module-scope | Promote to GlobalVariable in VulkanizePass |
+| C3-5 | Type mismatch cascade after promotion | Replacing Function ptr → Workgroup ptr breaks AccessChain types | Rebuild ALL downstream AccessChain/Load/Store ops |
+| C3-7 | Softmax fails (only promote last variable) | Softmax has 2 reductions = 2 shared allocas | Skip first match (load buffer), promote ALL rest |
 
-### The 8 Traps of C+3
+### Design Patterns Worth Remembering
 
-| # | Trap | What Happened | Fix |
-|---|------|--------------|-----|
-| C3-1 | `gpu.barrier` not converted | `convert-gpu-to-spirv` silently ignores `gpu.barrier` inside `func.func` — the pass only works on `gpu.func` or requires specific context | Use `func.call @__vulkan_barrier` placeholder; replace in VulkanizePass with `spirv.ControlBarrier` |
-| C3-2 | `spirv.ControlBarrier` at MemRef level | Inserting `spirv.*` ops at the MemRef level blocks `convert-func-to-spirv` — the function contains non-func ops and the converter refuses to process it | Same fix as C3-1: defer barrier creation to VulkanizePass |
-| C3-3 | `convert-memref-to-spirv` forces Function class | ALL `memref.alloca` → `spirv.Variable Function`, even those with Workgroup address space. The conversion ignores the memory space for the Variable's storage_class attribute | Detect by array size + block size from `vulkan.local_size`; promote in VulkanizePass |
-| C3-4 | Workgroup Variable must be module-scope | SPIR-V spec requires Workgroup storage class variables at module scope, not function scope. The verifier rejects function-scope Workgroup variables | VulkanizePass creates module-scope GlobalVariable and replaces the function-scope Variable |
-| C3-5 | Type cascade on Variable promotion | Replacing a Function ptr Variable with a Workgroup ptr AddressOf causes type mismatches in all downstream AccessChain/Load/Store ops | Rebuild ALL AccessChain + Load + Store ops with corrected Workgroup pointer types |
-| C3-6 | Arg layout shifted by 3 | Adding 3 local_id args shifts program_id from `numArgs-3` to `numArgs-6` and num_programs from `numArgs-6` to `numArgs-9` | Update `GetProgramIDConverter` and `GetNumProgramsConverter` |
-| C3-7 | Softmax has 2 reductions → 2 shared vars | Initially only promoted the LAST matching Variable. Softmax produces 2 shared allocas (max + sum) | Skip first matching Variable (load buffer), promote ALL subsequent |
-| C3-8 | MSVC `auto` cascading failures | One failed type deduction (`MemRefType::get` missing `#include`) causes ALL subsequent `auto` to fail with "cannot be used before initialized" | Always `#include` all used dialect headers; use explicit types for complex expressions |
+1. **Placeholder pattern:** `func.call @placeholder()` survives through ALL
+   MLIR conversion passes (func→spirv converts to `spirv.FunctionCall`).
+   Replace in VulkanizePass. Erase declaration. Works for barriers AND
+   subgroup ops.
 
-### Key Design Decisions
+2. **Module attributes beat function attributes:** `vulkan.local_size` on
+   the module, not the func. Function attributes don't survive `func-to-spirv`.
 
-1. **Barrier placeholder pattern:** `func.call @__vulkan_barrier()` survives
-   through all MLIR conversion passes unchanged (func→spirv converts it to
-   `spirv.FunctionCall`). VulkanizePass replaces and erases the declaration.
+3. **Detect by structure, not by attribute:** Custom attributes don't survive
+   `convert-*-to-spirv`. Match array dimensions against known values instead.
 
-2. **Shared memory detection by array size:** After SPIR-V conversion, the
-   original Workgroup address space is lost. We match `spirv.array<N>` where
-   N = block size from `vulkan.local_size`. First match = load buffer (from
-   `tt.load`), subsequent matches = shared memory.
-
-3. **Module-level attributes:** `vulkan.local_size` is set on the module (not
-   the function) because function attributes don't survive `func-to-spirv`.
-
-### Pipeline Order (C+3)
+### Pipeline Order After C+3
 
 ```python
 # make_memref:
-bufferize → convert_reduction_to_parallel → linalg_to_loops → lower_affine → scf_to_cf
+one_shot_bufferize
+→ convert_reduction_to_parallel   # linalg.reduce → tree reduction
+→ convert_matmul_to_cooperative   # linalg.matmul → coop placeholder (C+5)
+→ convert_linalg_to_loops
+→ lower_affine → convert_scf_to_cf → canonicalize + cse
 
 # make_spirv:
-prepare_spirv → scf_to_cf → canonicalize
-  → map_storage_class → fix_alloca_storage_class
-  → convert_{memref,arith,math,cf,func}_to_spirv → canonicalize
-  → vulkanize  # shared var promotion + barrier replacement + builtins
+prepare_spirv → lower_scf_to_cf → canonicalize
+→ map_storage_class → fix_alloca_storage_class
+→ convert_{memref,arith,math,cf,func}_to_spirv → canonicalize
+→ vulkanize   # shared mem promotion + barrier replacement + builtins
 ```
 
 ---
 
-## 5. Traps Summary (All C+ Steps)
+## 5. C+4: Subgroup Operations
 
-Quick reference for the 10 documented traps across C+1 through C+3:
+**Goal:** Replace the innermost tree reduction strides (< subgroupSize=32)
+with a single `spirv.GroupNonUniform*` op. Eliminates 5 barriers for
+256-element reductions (8 → 3 barriers).
+
+### How to Reproduce
+
+1. `VulkanCompute.{h,cpp}`: Add `subgroupSize_` field + `getSubgroupSize()`
+   method. Query via `VkPhysicalDeviceSubgroupProperties` in `pickPhysicalDevice`.
+   **Must use `VK_API_VERSION_1_1`** — trap C4-1.
+2. `triton_vulkan.cc`: Expose `subgroup_size()` to Python via pybind11
+3. In `ConvertReductionToParallel`:
+   a. Classify combiner op (arith.addf → fadd, arith.maximumf → fmax, etc.)
+   b. Set `stopStride = SUBGROUP_SIZE` if combiner maps to a subgroup op
+   c. Tree reduction loop runs only for strides ≥ stopStride
+   d. After loop: emit `func.call @__vulkan_subgroup_reduce_*(%shared[tid])`
+   e. Store subgroup result to shared[tid]
+   f. **Add barrier AFTER store** (trap C4-2!)
+   g. Read shared[0] as final result
+4. VulkanizePass: replace placeholder calls with `spirv.GroupNonUniform*Op`
+   (scope=Reduce, execution=Subgroup). Conditionally set VCE triple to
+   V_1_3 + `GroupNonUniform` + `GroupNonUniformArithmetic`.
+5. Clean up: erase all 6 `__vulkan_subgroup_reduce_*` function declarations
+
+### Combiner → Subgroup Op Mapping
+
+| Combiner | Placeholder | SPIR-V Op |
+|----------|------------|----------|
+| `arith.addf` | `__vulkan_subgroup_reduce_fadd` | `GroupNonUniformFAdd` |
+| `arith.addi` | `__vulkan_subgroup_reduce_iadd` | `GroupNonUniformIAdd` |
+| `arith.maximumf` | `__vulkan_subgroup_reduce_fmax` | `GroupNonUniformFMax` |
+| `arith.maxsi` | `__vulkan_subgroup_reduce_smax` | `GroupNonUniformSMax` |
+| `arith.minimumf` | `__vulkan_subgroup_reduce_fmin` | `GroupNonUniformFMin` |
+| `arith.minsi` | `__vulkan_subgroup_reduce_smin` | `GroupNonUniformSMin` |
+
+### Reduction Architecture (blockSize=256)
+
+```
+stride 128 → shared mem tree + barrier   ┐
+stride  64 → shared mem tree + barrier   ├ 3 strides, 3 barriers
+stride  32 → shared mem tree + barrier   ┘
+────── subgroup boundary (32 threads) ──────
+stride 16→1 → GroupNonUniformFAdd Reduce  ← 1 op replaces 5 strides
+→ barrier → read shared[0]
+Total: 4 barriers (was 9 without subgroup ops)
+```
+
+### Trap C4-1: Vulkan API Version
+
+`vkGetPhysicalDeviceProperties2` (for subgroup size query) requires
+`VK_API_VERSION_1_1`. With 1.0, `subgroupSize` silently returns 0.
+
+### Trap C4-2: Missing Barrier After Subgroup Reduce
+
+After the subgroup reduce, each subgroup stores its result to shared[tid].
+Subgroup 0 stores the correct answer in shared[0]. But threads in other
+subgroups (32+) may read shared[0] before subgroup 0's store completes.
+Without a barrier, **softmax fails with ~0.23 error** (race on shared[0]).
+This bug is hard to catch because reduce_sum and reduce_max pass — only
+softmax (2 reductions sharing the same shared memory) exposes the race.
+
+### Known Limitation
+
+Subgroup size is hardcoded to 32 (`constexpr SUBGROUP_SIZE = 32`). Correct
+for all NVIDIA GPUs. For AMD (64) or Intel (8/16/32), should be made
+configurable via module attribute.
+
+---
+
+## 6. Traps Reference (All 12)
 
 | ID | Category | One-liner |
 |----|----------|-----------|
@@ -184,32 +265,8 @@ Quick reference for the 10 documented traps across C+1 through C+3:
 | C3-6 | Convention | Adding args shifts existing arg indices in converters |
 | C3-7 | Semantics | Softmax = 2 reductions = 2 shared variables to promote |
 | C3-8 | MSVC | Missing `#include` causes cascading `auto` deduction failures |
-
----
-
-## 6. C+4 / C+5 Planning (Future)
-
-### C+4: Subgroup Operations
-
-Replace the innermost reduction strides (< subgroupSize) with
-`OpGroupNonUniform{IAdd,FAdd,SMax,...}`. Requires `VK_1_1` or
-`VK_KHR_shader_subgroup_extended_types`.
-
-**Expected approach:**
-- Add `subgroup_size` to VulkanCompute device query
-- In `ConvertReductionToParallel`, stop tree reduction at `stride = subgroupSize`
-- Emit `spirv.GroupNonUniformFAdd` etc. for the final strides
-- No shared memory needed for the subgroup portion
-
-### C+5: Cooperative Matrix
-
-Use `VK_KHR_cooperative_matrix` for matmul. Requires RTX 2080 Ti support
-check (Turing supports 16x16 fp16 cooperative matrix).
-
-**Expected approach:**
-- Query `VkPhysicalDeviceCooperativeMatrixPropertiesKHR`
-- Replace `linalg.matmul` → cooperative matrix load/multiply/store
-- Requires FP16 input support
+| C4-1 | Vulkan | `vkGetPhysicalDeviceProperties2` needs Vulkan 1.1 API version |
+| C4-2 | Synchronization | Missing barrier after subgroup reduce → race on shared[0] |
 
 ---
 
@@ -220,12 +277,12 @@ check (Turing supports 16x16 fp16 cooperative matrix).
 
 2. **MLIR SPIR-V conversion passes are black boxes.** They silently drop
    operations, force storage classes, and ignore attributes. Always verify
-   IR at every pipeline step.
+   IR at every pipeline step with `m.str_nodebug()`.
 
-3. **The barrier problem is fundamental.** There is NO clean way to express
-   workgroup barriers at the MemRef level that survives through MLIR's
-   SPIR-V conversion. The `func.call` placeholder pattern is the pragmatic
-   solution.
+3. **The placeholder pattern is the key innovation.** `func.call @name()`
+   survives through ALL MLIR conversion passes unchanged. VulkanizePass
+   replaces them with actual SPIR-V ops. Used for barriers, subgroup ops,
+   and cooperative matrix. This solves a fundamental MLIR infrastructure gap.
 
 4. **Module attributes > function attributes.** Function attributes don't
    survive dialect conversion. Store metadata on the module.
@@ -237,6 +294,11 @@ check (Turing supports 16x16 fp16 cooperative matrix).
 6. **Test after EVERY change.** Run all 11 tests after every edit. The
    pipeline is fragile — a change in arg layout breaks everything downstream.
 
-7. **Debug with `str_nodebug()`.** Print IR at each pipeline step. Search
-   for non-spirv ops with regex. The verifier error messages reference
-   source locations, not the actual offending op.
+7. **Debug with `str_nodebug()` + regex.** Print IR at each pipeline step.
+   Search for non-spirv ops: `re.findall(r'(memref\.\w+|gpu\.\w+)', text)`.
+   The verifier error messages reference source locations, not actual ops.
+
+8. **VCE triple must match actual ops.** `spirv.module` VCE triple must
+   include capabilities for ALL ops used. Non-reduction shaders stay at
+   V_1_0. Subgroup ops bump to V_1_3. Set conditionally based on
+   `hasSubgroupOps` flag.

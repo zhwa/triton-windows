@@ -1,0 +1,33 @@
+// Test: cooperative matrix matmul (fp16 inputs, fp32 accumulator)
+// C[16x16] = A[16x16] @ B[16x16], all in fp16
+module {
+  tt.func public @matmul_coop_kernel(
+      %a_ptr: !tt.ptr<f16>, %b_ptr: !tt.ptr<f16>, %c_ptr: !tt.ptr<f16>,
+      %M: i32, %N: i32, %K: i32) {
+    %c256 = arith.constant 256 : i32
+
+    // Load A (16x16) as flat 256 elements
+    %range = tt.make_range {start = 0 : i32, end = 256 : i32} : tensor<256xi32>
+    %ab = tt.splat %a_ptr : !tt.ptr<f16> -> tensor<256x!tt.ptr<f16>>
+    %ap = tt.addptr %ab, %range : tensor<256x!tt.ptr<f16>>, tensor<256xi32>
+    %a_flat = tt.load %ap : tensor<256x!tt.ptr<f16>>
+    %a = tt.reshape %a_flat : tensor<256xf16> -> tensor<16x16xf16>
+
+    // Load B (16x16) as flat 256 elements
+    %bb = tt.splat %b_ptr : !tt.ptr<f16> -> tensor<256x!tt.ptr<f16>>
+    %bp = tt.addptr %bb, %range : tensor<256x!tt.ptr<f16>>, tensor<256xi32>
+    %b_flat = tt.load %bp : tensor<256x!tt.ptr<f16>>
+    %b = tt.reshape %b_flat : tensor<256xf16> -> tensor<16x16xf16>
+
+    // Matmul: C = A @ B (fp16)
+    %zero = arith.constant dense<0.0> : tensor<16x16xf16>
+    %c = tt.dot %a, %b, %zero : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
+
+    // Store C as flat 256
+    %c_flat = tt.reshape %c : tensor<16x16xf16> -> tensor<256xf16>
+    %cb = tt.splat %c_ptr : !tt.ptr<f16> -> tensor<256x!tt.ptr<f16>>
+    %cp = tt.addptr %cb, %range : tensor<256x!tt.ptr<f16>>, tensor<256xi32>
+    tt.store %cp, %c_flat : tensor<256x!tt.ptr<f16>>
+    tt.return
+  }
+}

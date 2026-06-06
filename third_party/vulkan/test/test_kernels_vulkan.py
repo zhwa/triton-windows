@@ -76,6 +76,21 @@ A, B = np.random.randn(256).astype(np.float32), np.random.randn(256).astype(np.f
 vc, ids = run(*comp("test_matmul_simple"), [(A,256*4),(B,256*4),(np.zeros(256,np.float32),256*4)], [16,16,16,1,1,1])
 results.append(("matmul_16x16", np.max(np.abs(read(vc,ids[2],256).reshape(16,16) - A.reshape(16,16)@B.reshape(16,16))), 1e-4))
 
+# cooperative matrix matmul (fp16, 16x16)
+A16 = np.random.randn(256).astype(np.float16)
+B16 = np.random.randn(256).astype(np.float16)
+spv, md = comp("test_matmul_coop")
+vc = vulkan.runtime.VulkanCompute()
+vc.load_shader(spv, md["name"]); vc.set_workgroups(1)
+ids = []
+for i, (d, s) in enumerate([(A16, 256*2), (B16, 256*2), (np.zeros(256, np.float16), 256*2)]):
+    bid = vc.create_buffer(i, s); vc.write_buffer(bid, d); ids.append(bid)
+vc.set_push_constants(np.array([16, 16, 16, 1, 1, 1], dtype=np.int32))
+vc.dispatch()
+C16 = np.zeros(256, np.float16); vc.read_buffer(ids[2], C16)
+ref = (A16.reshape(16,16).astype(np.float32) @ B16.reshape(16,16).astype(np.float32)).astype(np.float16)
+results.append(("matmul_coop_f16", np.max(np.abs(C16.reshape(16,16) - ref)), 5e-2))
+
 # transpose
 x = np.random.randn(256).astype(np.float32)
 vc, ids = run(*comp("test_transpose"), [(x,256*4),(np.zeros(256,np.float32),256*4)], [16,16,1,1,1])
@@ -93,7 +108,7 @@ x_lg, y_lg = np.random.randn(N_LG).astype(np.float32), np.random.randn(N_LG).ast
 vc, ids = run(*comp("test_vector_add"), [(x_lg,N_LG*4),(y_lg,N_LG*4),(np.zeros(N_LG,np.float32),N_LG*4)], [N_LG, NB_LG, 1, 1], workgroups=NB_LG)
 results.append(("vadd_65k", np.max(np.abs(read(vc,ids[2],N_LG) - (x_lg+y_lg))), 1e-6))
 
-print("Vulkan SPIR-V dispatch (C+3: shared memory) — " + vulkan.runtime.VulkanCompute().device_name())
+print("Vulkan SPIR-V dispatch (C+5: coop matrix) — " + vulkan.runtime.VulkanCompute().device_name())
 print(f"{'Kernel':<20s} {'Error':>12s} {'Tol':>10s} {'Status':>8s}")
 print("-" * 54)
 passed = 0

@@ -60,6 +60,9 @@ void init_triton_vulkan_passes_linalg_to_memref(py::module &&m) {
   m.def("convert_reduction_to_parallel", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::vulkan::createConvertReductionToParallelPass());
   });
+  m.def("convert_matmul_to_cooperative", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::vulkan::createConvertMatmulToCooperativePass());
+  });
   m.def("convert_linalg_to_loops", [](mlir::PassManager &pm) {
     pm.addNestedPass<mlir::func::FuncOp>(
         mlir::createConvertLinalgToLoopsPass());
@@ -160,6 +163,7 @@ void init_triton_vulkan(py::module &&m) {
   py::class_<VulkanCompute>(vk, "VulkanCompute")
       .def(py::init<>())
       .def("device_name", &VulkanCompute::getDeviceName)
+      .def("subgroup_size", &VulkanCompute::getSubgroupSize)
       .def("load_shader",
            [](VulkanCompute &vc, py::bytes spirv_binary,
               const std::string &entry_point) {

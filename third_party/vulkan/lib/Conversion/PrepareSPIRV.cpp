@@ -301,11 +301,21 @@ public:
     auto moduleOp = getOperation();
     auto *ctx = &getContext();
 
-    // 1. Attach spirv.target_env
+    // 1. Attach spirv.target_env with all capabilities we might need.
+    // VulkanizePass will set the actual spirv.module VCE triple based on
+    // which features are used (subgroup ops, cooperative matrix, etc.)
     if (!moduleOp->hasAttr(spirv::getTargetEnvAttrName())) {
       auto triple = spirv::VerCapExtAttr::get(
-          spirv::Version::V_1_0, {spirv::Capability::Shader},
-          {spirv::Extension::SPV_KHR_storage_buffer_storage_class}, ctx);
+          spirv::Version::V_1_6,
+          {spirv::Capability::Shader,
+           spirv::Capability::Float16,
+           spirv::Capability::StorageBuffer16BitAccess,
+           spirv::Capability::GroupNonUniform,
+           spirv::Capability::GroupNonUniformArithmetic,
+           spirv::Capability::CooperativeMatrixKHR},
+          {spirv::Extension::SPV_KHR_storage_buffer_storage_class,
+           spirv::Extension::SPV_KHR_16bit_storage,
+           spirv::Extension::SPV_KHR_cooperative_matrix}, ctx);
       auto limits = spirv::ResourceLimitsAttr::get(
           ctx, 16384, 128,
           Builder(ctx).getI32ArrayAttr({128, 128, 64}),
@@ -525,6 +535,36 @@ public:
       allocaOp.getResult().replaceAllUsesWith(newAlloca.getResult());
       allocaOp.erase();
     });
+
+    // Update placeholder function declarations to match alloca type changes.
+    // After changing allocas to Function storage class, call sites may have
+    // mismatched types with the callee declaration (still StorageBuffer).
+    for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
+      if (!funcOp.isPrivate() || !funcOp.isDeclaration())
+        continue;
+      auto funcType = funcOp.getFunctionType();
+      bool changed = false;
+      SmallVector<Type> newInputs;
+      for (auto ty : funcType.getInputs()) {
+        if (auto memrefTy = dyn_cast<MemRefType>(ty)) {
+          if (memrefTy.getMemorySpace()) {
+            // Change StorageBuffer → Function for alloca-backed args
+            auto funcAttr = spirv::StorageClassAttr::get(
+                ctx, spirv::StorageClass::Function);
+            newInputs.push_back(MemRefType::get(
+                memrefTy.getShape(), memrefTy.getElementType(),
+                memrefTy.getLayout(), funcAttr));
+            changed = true;
+            continue;
+          }
+        }
+        newInputs.push_back(ty);
+      }
+      if (changed) {
+        funcOp.setFunctionType(
+            FunctionType::get(ctx, newInputs, funcType.getResults()));
+      }
+    }
   }
 };
 
@@ -647,8 +687,40 @@ public:
       // Barrier: ensure all threads have stored
       emitBarrier(builder, loc);
 
-      // Tree reduction: stride halving
-      for (int64_t stride = blockSize / 2; stride > 0; stride /= 2) {
+      // Determine subgroup size for optimization.
+      // If blockSize > subgroupSize AND the combiner maps to a known
+      // subgroup op, use shared memory tree reduction for outer strides
+      // (>= subgroupSize) and a single subgroup reduce for inner strides.
+      // Otherwise, fall back to full shared memory tree reduction.
+      // TODO: make configurable via module attribute instead of hardcoding.
+      constexpr int64_t SUBGROUP_SIZE = 32; // Turing/Ampere/Hopper
+
+      // Classify combiner op for subgroup reduce placeholder
+      auto *combiner = reduceOp.getCombiner().front().getTerminator();
+      std::string subgroupOpName;
+      if (!combiner->getOperands().empty()) {
+        auto *combinerOp = combiner->getOperand(0).getDefiningOp();
+        if (combinerOp) {
+          if (isa<arith::AddFOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_fadd";
+          else if (isa<arith::AddIOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_iadd";
+          else if (isa<arith::MaximumFOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_fmax";
+          else if (isa<arith::MaxSIOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_smax";
+          else if (isa<arith::MinimumFOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_fmin";
+          else if (isa<arith::MinSIOp>(combinerOp))
+            subgroupOpName = "__vulkan_subgroup_reduce_smin";
+        }
+      }
+
+      // Tree reduction: stride halving (only for strides >= SUBGROUP_SIZE)
+      int64_t stopStride = (!subgroupOpName.empty() && blockSize > SUBGROUP_SIZE)
+                               ? SUBGROUP_SIZE : 1;
+
+      for (int64_t stride = blockSize / 2; stride >= stopStride; stride /= 2) {
         auto strideConst =
             builder.create<arith::ConstantIndexOp>(loc, stride);
         auto cmp = builder.create<arith::CmpIOp>(
@@ -692,22 +764,166 @@ public:
         emitBarrier(builder, loc);
       }
 
-      // All threads read shared[0] → write to output
-      // (All threads store the same value; subsequent code may use it)
-      Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-      Value finalVal = builder.create<memref::LoadOp>(
-          loc, sharedRef, zero);
+      Value finalVal;
+      if (!subgroupOpName.empty() && blockSize > SUBGROUP_SIZE) {
+        // Subgroup reduce for inner strides (replaces strides 16→1).
+        // After shared memory tree reduction to stride=SUBGROUP_SIZE,
+        // threads 0..31 hold partial results in shared[0..31].
+        // A subgroup reduce across all 32 threads gives the final value.
+        //
+        // Emit: %result = call @__vulkan_subgroup_reduce_*(%shared[tid])
+        // VulkanizePass converts to spirv.GroupNonUniform* Reduce Subgroup.
+
+        // Declare the subgroup reduce function if needed
+        {
+          auto funcType = FunctionType::get(ctx, {elemType}, {elemType});
+          if (!moduleOp.lookupSymbol(subgroupOpName)) {
+            OpBuilder declBuilder(ctx);
+            declBuilder.setInsertionPointToStart(
+                &moduleOp.getBodyRegion().front());
+            auto decl = declBuilder.create<func::FuncOp>(
+                loc, subgroupOpName, funcType);
+            decl.setPrivate();
+          }
+        }
+
+        Value partialVal = builder.create<memref::LoadOp>(
+            loc, sharedRef, tidIdx);
+        auto callOp = builder.create<func::CallOp>(
+            loc, subgroupOpName, TypeRange{elemType},
+            ValueRange{partialVal});
+        Value subgroupResult = callOp.getResult(0);
+
+        // Store result to shared[tid] so all threads see it
+        builder.create<memref::StoreOp>(
+            loc, subgroupResult, sharedRef, tidIdx);
+
+        // Barrier: ensure subgroup 0's store to shared[0] is visible
+        // to all threads before reading
+        emitBarrier(builder, loc);
+
+        Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+        finalVal = builder.create<memref::LoadOp>(
+            loc, sharedRef, zero);
+      } else {
+        // No subgroup optimization — shared[0] already has the result
+        Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+        finalVal = builder.create<memref::LoadOp>(
+            loc, sharedRef, zero);
+      }
 
       Value outputMemref = reduceOp.getDpsInits()[0];
       auto outType = cast<MemRefType>(outputMemref.getType());
       SmallVector<Value> outIndices;
+      Value zeroIdx = builder.create<arith::ConstantIndexOp>(loc, 0);
       for (int64_t i = 0; i < outType.getRank(); i++)
-        outIndices.push_back(zero);
+        outIndices.push_back(zeroIdx);
       builder.create<memref::StoreOp>(
           loc, finalVal, outputMemref, outIndices);
 
       // Erase the original linalg.reduce
       reduceOp.erase();
+    }
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ConvertMatmulToCooperative: Replace linalg.matmul with coop matrix placeholder
+//===----------------------------------------------------------------------===//
+
+/// Replaces linalg.matmul on small static tiles (16x16) with a placeholder
+/// call that VulkanizePass converts to spirv.KHRCooperativeMatrix* ops.
+/// This pass runs AFTER bufferize but BEFORE linalg-to-loops.
+class ConvertMatmulToCooperative
+    : public PassWrapper<ConvertMatmulToCooperative, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertMatmulToCooperative)
+
+  StringRef getArgument() const override {
+    return "convert-matmul-to-cooperative";
+  }
+  StringRef getDescription() const override {
+    return "Convert linalg.matmul to cooperative matrix placeholder";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<memref::MemRefDialect, func::FuncDialect>();
+  }
+
+  void runOnOperation() override {
+    auto moduleOp = getOperation();
+    auto *ctx = &getContext();
+
+    SmallVector<linalg::MatmulOp> matmuls;
+    moduleOp.walk([&](linalg::MatmulOp op) { matmuls.push_back(op); });
+
+    if (matmuls.empty())
+      return;
+
+    for (auto matmulOp : matmuls) {
+      // Only handle 2D static matmuls that fit cooperative matrix tiles
+      auto outType = dyn_cast<MemRefType>(
+          matmulOp.getDpsInits()[0].getType());
+      if (!outType || outType.getRank() != 2) continue;
+
+      auto shape = outType.getShape();
+      if (ShapedType::isDynamic(shape[0]) || ShapedType::isDynamic(shape[1]))
+        continue;
+
+      // Check if dimensions match cooperative matrix tile (16x16)
+      // and element type is f16
+      auto elemType = outType.getElementType();
+      if (!elemType.isF16()) continue;
+      if (shape[0] != 16 || shape[1] != 16) continue;
+
+      auto aType = dyn_cast<MemRefType>(
+          matmulOp.getDpsInputs()[0].getType());
+      if (!aType || aType.getRank() != 2) continue;
+      if (aType.getShape()[0] != 16 || aType.getShape()[1] != 16) continue;
+
+      auto loc = matmulOp.getLoc();
+      OpBuilder builder(matmulOp);
+
+      // Tag module for VulkanizePass
+      moduleOp->setAttr("vulkan.coop_matmul", builder.getUnitAttr());
+
+      // Collapse 2D memrefs to 1D for the placeholder call.
+      // The cooperative matrix ops take flat pointers + stride,
+      // not 2D memrefs. This avoids conflicts with the 2D flattening
+      // pass in PrepareSPIRV.
+      auto flat1DType = MemRefType::get({256}, elemType);
+
+      auto aFlat = builder.create<memref::CollapseShapeOp>(
+          loc, flat1DType, matmulOp.getDpsInputs()[0],
+          SmallVector<ReassociationIndices>{{0, 1}});
+      auto bFlat = builder.create<memref::CollapseShapeOp>(
+          loc, flat1DType, matmulOp.getDpsInputs()[1],
+          SmallVector<ReassociationIndices>{{0, 1}});
+      auto cFlat = builder.create<memref::CollapseShapeOp>(
+          loc, flat1DType, matmulOp.getDpsInits()[0],
+          SmallVector<ReassociationIndices>{{0, 1}});
+
+      // Declare placeholder function:
+      //   @__vulkan_coop_matmul(%A: memref<256xf16>, %B: memref<256xf16>,
+      //                         %C: memref<256xf16>)
+      std::string funcName = "__vulkan_coop_matmul";
+      if (!moduleOp.lookupSymbol(funcName)) {
+        auto funcType = FunctionType::get(ctx,
+            {flat1DType, flat1DType, flat1DType}, {});
+        OpBuilder declBuilder(ctx);
+        declBuilder.setInsertionPointToStart(
+            &moduleOp.getBodyRegion().front());
+        auto decl = declBuilder.create<func::FuncOp>(
+            loc, funcName, funcType);
+        decl.setPrivate();
+      }
+
+      builder.create<func::CallOp>(
+          loc, funcName, TypeRange{},
+          ValueRange{aFlat, bFlat, cFlat});
+
+      // Erase the matmul
+      matmulOp.erase();
     }
   }
 };
@@ -777,11 +993,8 @@ public:
         loc, spirv::AddressingModel::Logical,
         spirv::MemoryModel::GLSL450);
 
-    // Set VCE triple for serialization
-    auto triple = spirv::VerCapExtAttr::get(
-        spirv::Version::V_1_0, {spirv::Capability::Shader},
-        {spirv::Extension::SPV_KHR_storage_buffer_storage_class}, ctx);
-    spirvModule.setVceTripleAttr(triple);
+    // VCE triple will be set after all replacements (need to know if
+    // subgroup ops are used)
 
     // Build inside the spirv.module body
     auto *spirvBody = spirvModule.getBody();
@@ -1076,6 +1289,166 @@ public:
       barrierDecl.erase();
     }
 
+    // Replace subgroup reduce placeholder calls with spirv.GroupNonUniform* ops
+    bool hasSubgroupOps = false;
+    SmallVector<spirv::FunctionCallOp> subgroupCalls;
+    funcOp.walk([&](spirv::FunctionCallOp callOp) {
+      auto callee = callOp.getCallee();
+      if (callee.starts_with("__vulkan_subgroup_reduce_"))
+        subgroupCalls.push_back(callOp);
+    });
+    for (auto callOp : subgroupCalls) {
+      hasSubgroupOps = true;
+      auto callee = callOp.getCallee();
+      auto inputVal = callOp.getOperand(0);
+      auto resultType = callOp.getResult(0).getType();
+      auto subgroupScope = spirv::ScopeAttr::get(ctx, spirv::Scope::Subgroup);
+      auto reduceOp = spirv::GroupOperationAttr::get(
+          ctx, spirv::GroupOperation::Reduce);
+
+      OpBuilder sgBuilder(callOp);
+      Value replacement;
+      if (callee == "__vulkan_subgroup_reduce_fadd") {
+        replacement = spirv::GroupNonUniformFAddOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      } else if (callee == "__vulkan_subgroup_reduce_iadd") {
+        replacement = spirv::GroupNonUniformIAddOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      } else if (callee == "__vulkan_subgroup_reduce_fmax") {
+        replacement = spirv::GroupNonUniformFMaxOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      } else if (callee == "__vulkan_subgroup_reduce_smax") {
+        replacement = spirv::GroupNonUniformSMaxOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      } else if (callee == "__vulkan_subgroup_reduce_fmin") {
+        replacement = spirv::GroupNonUniformFMinOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      } else if (callee == "__vulkan_subgroup_reduce_smin") {
+        replacement = spirv::GroupNonUniformSMinOp::create(
+            sgBuilder, callOp.getLoc(), resultType,
+            subgroupScope, reduceOp, inputVal, /*cluster_size=*/nullptr);
+      }
+      if (replacement) {
+        callOp.getResult(0).replaceAllUsesWith(replacement);
+        callOp.erase();
+      }
+    }
+    // Remove subgroup reduce function declarations
+    for (auto name : {"__vulkan_subgroup_reduce_fadd",
+                      "__vulkan_subgroup_reduce_iadd",
+                      "__vulkan_subgroup_reduce_fmax",
+                      "__vulkan_subgroup_reduce_smax",
+                      "__vulkan_subgroup_reduce_fmin",
+                      "__vulkan_subgroup_reduce_smin"}) {
+      if (auto decl = dyn_cast_or_null<spirv::FuncOp>(
+              spirvModule.lookupSymbol(name))) {
+        decl.erase();
+      }
+    }
+
+    // Replace cooperative matmul placeholder calls with
+    // spirv.KHRCooperativeMatrix{Load,MulAdd,Store} ops.
+    bool hasCoopMatmul = false;
+    SmallVector<spirv::FunctionCallOp> coopCalls;
+    funcOp.walk([&](spirv::FunctionCallOp callOp) {
+      if (callOp.getCallee() == "__vulkan_coop_matmul")
+        coopCalls.push_back(callOp);
+    });
+    for (auto callOp : coopCalls) {
+      hasCoopMatmul = true;
+      OpBuilder cmBuilder(callOp);
+      auto cLoc = callOp.getLoc();
+
+      // Args: %A_flat, %B_flat, %C_flat (StorageBuffer ptrs to struct<array<256 x f16>>)
+      auto aPtr = callOp.getOperand(0);
+      auto bPtr = callOp.getOperand(1);
+      auto cPtr = callOp.getOperand(2);
+
+      // Create cooperative matrix types
+      auto f16Type = cmBuilder.getF16Type();
+      auto f32Type = cmBuilder.getF32Type();
+      auto subgroupScope = spirv::Scope::Subgroup;
+
+      auto coopTypeA = spirv::CooperativeMatrixType::get(
+          f16Type, 16, 16, subgroupScope,
+          spirv::CooperativeMatrixUseKHR::MatrixA);
+      auto coopTypeB = spirv::CooperativeMatrixType::get(
+          f16Type, 16, 16, subgroupScope,
+          spirv::CooperativeMatrixUseKHR::MatrixB);
+      auto coopTypeAcc = spirv::CooperativeMatrixType::get(
+          f32Type, 16, 16, subgroupScope,
+          spirv::CooperativeMatrixUseKHR::MatrixAcc);
+      auto coopTypeResult = spirv::CooperativeMatrixType::get(
+          f16Type, 16, 16, subgroupScope,
+          spirv::CooperativeMatrixUseKHR::MatrixAcc);
+
+      // Get pointer to first element: AccessChain %ptr[0, 0]
+      // Use the storage class from the actual pointer operand
+      auto cst0 = cmBuilder.create<spirv::ConstantOp>(
+          cLoc, cmBuilder.getI32Type(), cmBuilder.getI32IntegerAttr(0));
+
+      auto getElemPtr = [&](Value ptr) -> Value {
+        auto basePtrType = cast<spirv::PointerType>(ptr.getType());
+        auto sc = basePtrType.getStorageClass();
+        auto elemPtrType = spirv::PointerType::get(f16Type, sc);
+        return cmBuilder.create<spirv::AccessChainOp>(
+            cLoc, elemPtrType, ptr, ValueRange{cst0, cst0});
+      };
+      auto aPtrElem = getElemPtr(aPtr);
+      auto bPtrElem = getElemPtr(bPtr);
+      auto cPtrElem = getElemPtr(cPtr);
+
+      // Stride = 16 (row-major, 16 columns)
+      auto stride = cmBuilder.create<spirv::ConstantOp>(
+          cLoc, cmBuilder.getI32Type(), cmBuilder.getI32IntegerAttr(16));
+      auto layoutAttr = spirv::CooperativeMatrixLayoutKHRAttr::get(
+          ctx, spirv::CooperativeMatrixLayoutKHR::RowMajor);
+
+      // Load A and B from element pointers
+      auto loadA = spirv::KHRCooperativeMatrixLoadOp::create(
+          cmBuilder, cLoc, coopTypeA, aPtrElem, layoutAttr, stride,
+          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+
+      // Load B: coopMatB = KHRCooperativeMatrixLoad(bPtr, layout, stride)
+      auto loadB = spirv::KHRCooperativeMatrixLoadOp::create(
+          cmBuilder, cLoc, coopTypeB, bPtrElem, layoutAttr, stride,
+          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+
+      // Zero accumulator
+      auto zeroF32 = cmBuilder.create<spirv::ConstantOp>(
+          cLoc, f32Type, cmBuilder.getF32FloatAttr(0.0f));
+      auto zeroAcc = cmBuilder.create<spirv::CompositeConstructOp>(
+          cLoc, coopTypeAcc, ValueRange{zeroF32});
+
+      // MulAdd: result = A * B + 0
+      auto mulAdd = spirv::KHRCooperativeMatrixMulAddOp::create(
+          cmBuilder, cLoc, coopTypeAcc,
+          loadA.getResult(), loadB.getResult(), zeroAcc,
+          /*matrix_operands=*/nullptr);
+
+      // Convert f32 accumulator result to f16 for storage
+      // Use spirv.FConvert to narrow each element
+      auto narrowed = cmBuilder.create<spirv::FConvertOp>(
+          cLoc, coopTypeResult, mulAdd.getResult());
+
+      // Store result to element pointer
+      spirv::KHRCooperativeMatrixStoreOp::create(
+          cmBuilder, cLoc, cPtrElem, narrowed, layoutAttr, stride,
+          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+
+      callOp.erase();
+    }
+    // Remove coop matmul function declaration
+    if (auto decl = dyn_cast_or_null<spirv::FuncOp>(
+            spirvModule.lookupSymbol("__vulkan_coop_matmul"))) {
+      decl.erase();
+    }
+
     // Build new function type with NO args (all via globals/push constants/builtins)
     auto newFuncType = FunctionType::get(ctx, {}, {});
     funcOp.setFunctionType(newFuncType);
@@ -1083,6 +1456,32 @@ public:
     // Remove ALL args from block (in reverse)
     while (entryBlock.getNumArguments() > 0)
       entryBlock.eraseArgument(entryBlock.getNumArguments() - 1);
+
+    // Set VCE triple for serialization (after all replacements are done).
+    // Conditionally add capabilities for subgroup ops and cooperative matrix.
+    {
+      SmallVector<spirv::Capability> caps = {spirv::Capability::Shader};
+      SmallVector<spirv::Extension> exts = {
+          spirv::Extension::SPV_KHR_storage_buffer_storage_class};
+      auto spirvVersion = spirv::Version::V_1_0;
+      if (hasSubgroupOps) {
+        spirvVersion = spirv::Version::V_1_3;
+        caps.push_back(spirv::Capability::GroupNonUniform);
+        caps.push_back(spirv::Capability::GroupNonUniformArithmetic);
+      }
+      if (hasCoopMatmul) {
+        if (spirvVersion < spirv::Version::V_1_6)
+          spirvVersion = spirv::Version::V_1_6;
+        caps.push_back(spirv::Capability::Float16);
+        caps.push_back(spirv::Capability::StorageBuffer16BitAccess);
+        caps.push_back(spirv::Capability::CooperativeMatrixKHR);
+        exts.push_back(spirv::Extension::SPV_KHR_16bit_storage);
+        exts.push_back(spirv::Extension::SPV_KHR_cooperative_matrix);
+      }
+      auto triple = spirv::VerCapExtAttr::get(
+          spirvVersion, caps, exts, ctx);
+      spirvModule.setVceTripleAttr(triple);
+    }
 
     // Add spirv.EntryPoint (interfaceVarRefs already populated above)
     builder.setInsertionPointAfter(funcOp);
@@ -1128,6 +1527,10 @@ std::unique_ptr<OperationPass<ModuleOp>> createPrepareSPIRVPass() {
 
 std::unique_ptr<OperationPass<ModuleOp>> createConvertReductionToParallelPass() {
   return std::make_unique<ConvertReductionToParallel>();
+}
+
+std::unique_ptr<OperationPass<ModuleOp>> createConvertMatmulToCooperativePass() {
+  return std::make_unique<ConvertMatmulToCooperative>();
 }
 
 } // namespace vulkan
