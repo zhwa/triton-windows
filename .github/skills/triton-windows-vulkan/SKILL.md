@@ -10,7 +10,7 @@ user-invocable: true
 Complete guide to the Vulkan backend for triton-windows. Covers the full
 pipeline from Triton IR to GPU execution via native Vulkan compute dispatch.
 
-**11/11 kernels verified on RTX 2080 Ti via Vulkan SPIR-V dispatch (incl. multi-block + 65k).**
+**12/12 kernels verified on RTX 2080 Ti via Vulkan SPIR-V dispatch (incl. cooperative matrix matmul).**
 
 ## 1. Architecture
 
@@ -30,7 +30,7 @@ TTIR → make_ttir → make_linalg → make_memref → make_spirv → make_spv �
 | `lib/Runtime/VulkanCompute.{h,cpp}` | Vulkan compute dispatch engine |
 | `triton_vulkan.cc` | pybind11 module exposing passes + runtime |
 | `backend/compiler.py` | Python pipeline orchestration |
-| `test/test_kernels_vulkan.py` | 11-kernel Vulkan GPU test suite (incl. multi-block + large-N) |
+| `test/test_kernels_vulkan.py` | 12-kernel Vulkan GPU test suite (incl. cooperative matrix) |
 
 ### Build Commands
 
@@ -122,7 +122,7 @@ Step 4: vulkanize
 ## 4. VulkanizePass
 
 Converts `spirv.func @kernel(args...)` → Vulkan-compatible `spirv.module`.
-This is the most complex pass — it handles six responsibilities:
+This is the most complex pass. Core responsibilities (C+ additions in perf skill):
 
 **a) Buffer args → GlobalVariables:**
 StorageBuffer pointer args → `spirv.GlobalVariable` with `bind(0, N)`

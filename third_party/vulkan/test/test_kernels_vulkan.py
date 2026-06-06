@@ -1,4 +1,4 @@
-"""Vulkan SPIR-V dispatch test suite (11 kernels incl. multi-block + parallel reduction)."""
+"""Vulkan SPIR-V dispatch test suite (12 kernels incl. cooperative matrix matmul)."""
 import os, sys, numpy as np
 os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 from triton._C.libtriton import ir, passes, vulkan
@@ -76,7 +76,12 @@ A, B = np.random.randn(256).astype(np.float32), np.random.randn(256).astype(np.f
 vc, ids = run(*comp("test_matmul_simple"), [(A,256*4),(B,256*4),(np.zeros(256,np.float32),256*4)], [16,16,16,1,1,1])
 results.append(("matmul_16x16", np.max(np.abs(read(vc,ids[2],256).reshape(16,16) - A.reshape(16,16)@B.reshape(16,16))), 1e-4))
 
-# cooperative matrix matmul (fp16, 16x16)
+# transpose
+x = np.random.randn(256).astype(np.float32)
+vc, ids = run(*comp("test_transpose"), [(x,256*4),(np.zeros(256,np.float32),256*4)], [16,16,1,1,1])
+results.append(("transpose", np.max(np.abs(read(vc,ids[1],256) - x.reshape(16,16).T.flatten())), 1e-6))
+
+# cooperative matrix matmul (fp16, 16x16) — reads directly from StorageBuffer
 A16 = np.random.randn(256).astype(np.float16)
 B16 = np.random.randn(256).astype(np.float16)
 spv, md = comp("test_matmul_coop")
@@ -90,11 +95,6 @@ vc.dispatch()
 C16 = np.zeros(256, np.float16); vc.read_buffer(ids[2], C16)
 ref = (A16.reshape(16,16).astype(np.float32) @ B16.reshape(16,16).astype(np.float32)).astype(np.float16)
 results.append(("matmul_coop_f16", np.max(np.abs(C16.reshape(16,16) - ref)), 5e-2))
-
-# transpose
-x = np.random.randn(256).astype(np.float32)
-vc, ids = run(*comp("test_transpose"), [(x,256*4),(np.zeros(256,np.float32),256*4)], [16,16,1,1,1])
-results.append(("transpose", np.max(np.abs(read(vc,ids[1],256) - x.reshape(16,16).T.flatten())), 1e-6))
 
 # multi-block vector_add: 1024 elements = 4 workgroups of BLOCK_SIZE=256
 N_MB = 1024; NB = 4

@@ -535,36 +535,6 @@ public:
       allocaOp.getResult().replaceAllUsesWith(newAlloca.getResult());
       allocaOp.erase();
     });
-
-    // Update placeholder function declarations to match alloca type changes.
-    // After changing allocas to Function storage class, call sites may have
-    // mismatched types with the callee declaration (still StorageBuffer).
-    for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
-      if (!funcOp.isPrivate() || !funcOp.isDeclaration())
-        continue;
-      auto funcType = funcOp.getFunctionType();
-      bool changed = false;
-      SmallVector<Type> newInputs;
-      for (auto ty : funcType.getInputs()) {
-        if (auto memrefTy = dyn_cast<MemRefType>(ty)) {
-          if (memrefTy.getMemorySpace()) {
-            // Change StorageBuffer → Function for alloca-backed args
-            auto funcAttr = spirv::StorageClassAttr::get(
-                ctx, spirv::StorageClass::Function);
-            newInputs.push_back(MemRefType::get(
-                memrefTy.getShape(), memrefTy.getElementType(),
-                memrefTy.getLayout(), funcAttr));
-            changed = true;
-            continue;
-          }
-        }
-        newInputs.push_back(ty);
-      }
-      if (changed) {
-        funcOp.setFunctionType(
-            FunctionType::get(ctx, newInputs, funcType.getResults()));
-      }
-    }
   }
 };
 
@@ -831,9 +801,80 @@ public:
 // ConvertMatmulToCooperative: Replace linalg.matmul with coop matrix placeholder
 //===----------------------------------------------------------------------===//
 
-/// Replaces linalg.matmul on small static tiles (16x16) with a placeholder
-/// call that VulkanizePass converts to spirv.KHRCooperativeMatrix* ops.
-/// This pass runs AFTER bufferize but BEFORE linalg-to-loops.
+/// Traces a bufferized matmul operand backward to its original function arg.
+/// Pattern: alloc → memref.copy(source, alloc) → source traces through
+/// reinterpret_cast/cast/subview to a BlockArgument.
+static std::optional<unsigned> traceToFuncArg(Value operand) {
+  // Operand is typically an alloc result
+  auto allocOp = operand.getDefiningOp<memref::AllocOp>();
+  if (!allocOp) return std::nullopt;
+
+  // Find memref.copy where this alloc is the destination
+  for (auto *user : allocOp->getUsers()) {
+    auto copyOp = dyn_cast<memref::CopyOp>(user);
+    if (!copyOp || copyOp.getTarget() != allocOp.getResult())
+      continue;
+
+    // Walk the source through view-like ops to find the func arg
+    Value source = copyOp.getSource();
+    while (true) {
+      if (auto blockArg = dyn_cast<BlockArgument>(source))
+        return blockArg.getArgNumber();
+      if (auto op = source.getDefiningOp<memref::ReinterpretCastOp>()) {
+        source = op.getSource(); continue;
+      }
+      if (auto op = source.getDefiningOp<memref::CastOp>()) {
+        source = op.getSource(); continue;
+      }
+      if (auto op = source.getDefiningOp<memref::SubViewOp>()) {
+        source = op.getSource(); continue;
+      }
+      break;
+    }
+  }
+  return std::nullopt;
+}
+
+/// Traces a matmul output forward: alloc → collapse_shape/copy → destination
+/// → through view ops to a BlockArgument.
+static std::optional<unsigned> traceOutputToFuncArg(Value initOperand) {
+  auto allocOp = initOperand.getDefiningOp<memref::AllocOp>();
+  if (!allocOp) return std::nullopt;
+
+  // Walk users to find copy/collapse that leads to the output buffer
+  SmallVector<Value> worklist = {allocOp.getResult()};
+  while (!worklist.empty()) {
+    Value current = worklist.pop_back_val();
+    for (auto *user : current.getUsers()) {
+      // memref.copy where current is SOURCE → trace dest to func arg
+      if (auto copyOp = dyn_cast<memref::CopyOp>(user)) {
+        if (copyOp.getSource() == current) {
+          Value dest = copyOp.getTarget();
+          while (true) {
+            if (auto blockArg = dyn_cast<BlockArgument>(dest))
+              return blockArg.getArgNumber();
+            if (auto op = dest.getDefiningOp<memref::ReinterpretCastOp>()) {
+              dest = op.getSource(); continue;
+            }
+            if (auto op = dest.getDefiningOp<memref::CastOp>()) {
+              dest = op.getSource(); continue;
+            }
+            break;
+          }
+        }
+      }
+      // collapse_shape → follow its result
+      if (auto collapseOp = dyn_cast<memref::CollapseShapeOp>(user))
+        worklist.push_back(collapseOp.getResult());
+    }
+  }
+  return std::nullopt;
+}
+
+/// Replaces linalg.matmul on small static tiles (16x16 f16) with a no-arg
+/// placeholder call. Buffer arg indices are stored as module attributes so
+/// VulkanizePass can access StorageBuffer GlobalVariables directly (bypassing
+/// the alloca-copy pattern that produces Function-class pointers).
 class ConvertMatmulToCooperative
     : public PassWrapper<ConvertMatmulToCooperative, OperationPass<ModuleOp>> {
 public:
@@ -861,7 +902,7 @@ public:
       return;
 
     for (auto matmulOp : matmuls) {
-      // Only handle 2D static matmuls that fit cooperative matrix tiles
+      // Only handle 2D static 16x16 f16 matmuls
       auto outType = dyn_cast<MemRefType>(
           matmulOp.getDpsInits()[0].getType());
       if (!outType || outType.getRank() != 2) continue;
@@ -870,8 +911,6 @@ public:
       if (ShapedType::isDynamic(shape[0]) || ShapedType::isDynamic(shape[1]))
         continue;
 
-      // Check if dimensions match cooperative matrix tile (16x16)
-      // and element type is f16
       auto elemType = outType.getElementType();
       if (!elemType.isF16()) continue;
       if (shape[0] != 16 || shape[1] != 16) continue;
@@ -881,35 +920,37 @@ public:
       if (!aType || aType.getRank() != 2) continue;
       if (aType.getShape()[0] != 16 || aType.getShape()[1] != 16) continue;
 
+      // Trace operands back to function args
+      auto argA = traceToFuncArg(matmulOp.getDpsInputs()[0]);
+      auto argB = traceToFuncArg(matmulOp.getDpsInputs()[1]);
+      auto argC = traceOutputToFuncArg(matmulOp.getDpsInits()[0]);
+
+      if (!argA || !argB || !argC) {
+        matmulOp.emitWarning("Could not trace coop matmul operands to "
+                             "function args; skipping cooperative conversion");
+        continue;
+      }
+
       auto loc = matmulOp.getLoc();
       OpBuilder builder(matmulOp);
 
-      // Tag module for VulkanizePass
+      // Store metadata as module attributes for VulkanizePass
       moduleOp->setAttr("vulkan.coop_matmul", builder.getUnitAttr());
+      moduleOp->setAttr("vulkan.coop_buffer_args",
+                         builder.getI64ArrayAttr(
+                             {static_cast<int64_t>(*argA),
+                              static_cast<int64_t>(*argB),
+                              static_cast<int64_t>(*argC)}));
+      moduleOp->setAttr("vulkan.coop_dims",
+                         builder.getI64ArrayAttr({shape[0], shape[1],
+                             aType.getShape()[1]}));
 
-      // Collapse 2D memrefs to 1D for the placeholder call.
-      // The cooperative matrix ops take flat pointers + stride,
-      // not 2D memrefs. This avoids conflicts with the 2D flattening
-      // pass in PrepareSPIRV.
-      auto flat1DType = MemRefType::get({256}, elemType);
-
-      auto aFlat = builder.create<memref::CollapseShapeOp>(
-          loc, flat1DType, matmulOp.getDpsInputs()[0],
-          SmallVector<ReassociationIndices>{{0, 1}});
-      auto bFlat = builder.create<memref::CollapseShapeOp>(
-          loc, flat1DType, matmulOp.getDpsInputs()[1],
-          SmallVector<ReassociationIndices>{{0, 1}});
-      auto cFlat = builder.create<memref::CollapseShapeOp>(
-          loc, flat1DType, matmulOp.getDpsInits()[0],
-          SmallVector<ReassociationIndices>{{0, 1}});
-
-      // Declare placeholder function:
-      //   @__vulkan_coop_matmul(%A: memref<256xf16>, %B: memref<256xf16>,
-      //                         %C: memref<256xf16>)
+      // Emit no-arg placeholder call.
+      // VulkanizePass will use vulkan.coop_buffer_args to access the
+      // correct StorageBuffer GlobalVariables directly.
       std::string funcName = "__vulkan_coop_matmul";
       if (!moduleOp.lookupSymbol(funcName)) {
-        auto funcType = FunctionType::get(ctx,
-            {flat1DType, flat1DType, flat1DType}, {});
+        auto funcType = FunctionType::get(ctx, {}, {});
         OpBuilder declBuilder(ctx);
         declBuilder.setInsertionPointToStart(
             &moduleOp.getBodyRegion().front());
@@ -918,11 +959,8 @@ public:
         decl.setPrivate();
       }
 
-      builder.create<func::CallOp>(
-          loc, funcName, TypeRange{},
-          ValueRange{aFlat, bFlat, cFlat});
+      builder.create<func::CallOp>(loc, funcName, TypeRange{}, ValueRange{});
 
-      // Erase the matmul
       matmulOp.erase();
     }
   }
@@ -1353,95 +1391,120 @@ public:
 
     // Replace cooperative matmul placeholder calls with
     // spirv.KHRCooperativeMatrix{Load,MulAdd,Store} ops.
+    // Unlike other placeholders, coop matmul uses StorageBuffer GlobalVariables
+    // directly (from vulkan.coop_buffer_args attribute) instead of the
+    // Function-class alloca copies that the placeholder operands would provide.
     bool hasCoopMatmul = false;
     SmallVector<spirv::FunctionCallOp> coopCalls;
     funcOp.walk([&](spirv::FunctionCallOp callOp) {
       if (callOp.getCallee() == "__vulkan_coop_matmul")
         coopCalls.push_back(callOp);
     });
-    for (auto callOp : coopCalls) {
+    if (!coopCalls.empty() && moduleOp->hasAttr("vulkan.coop_buffer_args")) {
       hasCoopMatmul = true;
-      OpBuilder cmBuilder(callOp);
-      auto cLoc = callOp.getLoc();
+      auto argsAttr = moduleOp->getAttrOfType<ArrayAttr>("vulkan.coop_buffer_args");
+      auto dimsAttr = moduleOp->getAttrOfType<ArrayAttr>("vulkan.coop_dims");
 
-      // Args: %A_flat, %B_flat, %C_flat (StorageBuffer ptrs to struct<array<256 x f16>>)
-      auto aPtr = callOp.getOperand(0);
-      auto bPtr = callOp.getOperand(1);
-      auto cPtr = callOp.getOperand(2);
-
-      // Create cooperative matrix types
-      auto f16Type = cmBuilder.getF16Type();
-      auto f32Type = cmBuilder.getF32Type();
-      auto subgroupScope = spirv::Scope::Subgroup;
-
-      auto coopTypeA = spirv::CooperativeMatrixType::get(
-          f16Type, 16, 16, subgroupScope,
-          spirv::CooperativeMatrixUseKHR::MatrixA);
-      auto coopTypeB = spirv::CooperativeMatrixType::get(
-          f16Type, 16, 16, subgroupScope,
-          spirv::CooperativeMatrixUseKHR::MatrixB);
-      auto coopTypeAcc = spirv::CooperativeMatrixType::get(
-          f32Type, 16, 16, subgroupScope,
-          spirv::CooperativeMatrixUseKHR::MatrixAcc);
-      auto coopTypeResult = spirv::CooperativeMatrixType::get(
-          f16Type, 16, 16, subgroupScope,
-          spirv::CooperativeMatrixUseKHR::MatrixAcc);
-
-      // Get pointer to first element: AccessChain %ptr[0, 0]
-      // Use the storage class from the actual pointer operand
-      auto cst0 = cmBuilder.create<spirv::ConstantOp>(
-          cLoc, cmBuilder.getI32Type(), cmBuilder.getI32IntegerAttr(0));
-
-      auto getElemPtr = [&](Value ptr) -> Value {
-        auto basePtrType = cast<spirv::PointerType>(ptr.getType());
-        auto sc = basePtrType.getStorageClass();
-        auto elemPtrType = spirv::PointerType::get(f16Type, sc);
-        return cmBuilder.create<spirv::AccessChainOp>(
-            cLoc, elemPtrType, ptr, ValueRange{cst0, cst0});
+      // Map buffer arg index → GlobalVariable
+      // bufferArgIndices[i] → globalVars[i], so we need to find which
+      // position in bufferArgIndices matches the coop arg index.
+      auto findGlobalVar = [&](int64_t funcArgIdx) -> spirv::GlobalVariableOp {
+        for (unsigned i = 0; i < bufferArgIndices.size(); i++) {
+          if (bufferArgIndices[i] == static_cast<unsigned>(funcArgIdx))
+            return globalVars[i];
+        }
+        return nullptr;
       };
-      auto aPtrElem = getElemPtr(aPtr);
-      auto bPtrElem = getElemPtr(bPtr);
-      auto cPtrElem = getElemPtr(cPtr);
 
-      // Stride = 16 (row-major, 16 columns)
-      auto stride = cmBuilder.create<spirv::ConstantOp>(
-          cLoc, cmBuilder.getI32Type(), cmBuilder.getI32IntegerAttr(16));
-      auto layoutAttr = spirv::CooperativeMatrixLayoutKHRAttr::get(
-          ctx, spirv::CooperativeMatrixLayoutKHR::RowMajor);
+      int64_t argIdxA = cast<IntegerAttr>(argsAttr[0]).getInt();
+      int64_t argIdxB = cast<IntegerAttr>(argsAttr[1]).getInt();
+      int64_t argIdxC = cast<IntegerAttr>(argsAttr[2]).getInt();
+      int64_t stride = dimsAttr
+          ? cast<IntegerAttr>(dimsAttr[1]).getInt() : 16;
 
-      // Load A and B from element pointers
-      auto loadA = spirv::KHRCooperativeMatrixLoadOp::create(
-          cmBuilder, cLoc, coopTypeA, aPtrElem, layoutAttr, stride,
-          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+      auto gvA = findGlobalVar(argIdxA);
+      auto gvB = findGlobalVar(argIdxB);
+      auto gvC = findGlobalVar(argIdxC);
 
-      // Load B: coopMatB = KHRCooperativeMatrixLoad(bPtr, layout, stride)
-      auto loadB = spirv::KHRCooperativeMatrixLoadOp::create(
-          cmBuilder, cLoc, coopTypeB, bPtrElem, layoutAttr, stride,
-          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+      if (!gvA || !gvB || !gvC) {
+        funcOp.emitError("Could not find GlobalVariables for coop matrix args");
+        return signalPassFailure();
+      }
 
-      // Zero accumulator
-      auto zeroF32 = cmBuilder.create<spirv::ConstantOp>(
-          cLoc, f32Type, cmBuilder.getF32FloatAttr(0.0f));
-      auto zeroAcc = cmBuilder.create<spirv::CompositeConstructOp>(
-          cLoc, coopTypeAcc, ValueRange{zeroF32});
+      for (auto callOp : coopCalls) {
+        OpBuilder cmBuilder(callOp);
+        auto cLoc = callOp.getLoc();
 
-      // MulAdd: result = A * B + 0
-      auto mulAdd = spirv::KHRCooperativeMatrixMulAddOp::create(
-          cmBuilder, cLoc, coopTypeAcc,
-          loadA.getResult(), loadB.getResult(), zeroAcc,
-          /*matrix_operands=*/nullptr);
+        auto f16Type = cmBuilder.getF16Type();
+        auto f32Type = cmBuilder.getF32Type();
+        auto subgroupScope = spirv::Scope::Subgroup;
 
-      // Convert f32 accumulator result to f16 for storage
-      // Use spirv.FConvert to narrow each element
-      auto narrowed = cmBuilder.create<spirv::FConvertOp>(
-          cLoc, coopTypeResult, mulAdd.getResult());
+        auto coopTypeA = spirv::CooperativeMatrixType::get(
+            f16Type, 16, 16, subgroupScope,
+            spirv::CooperativeMatrixUseKHR::MatrixA);
+        auto coopTypeB = spirv::CooperativeMatrixType::get(
+            f16Type, 16, 16, subgroupScope,
+            spirv::CooperativeMatrixUseKHR::MatrixB);
+        auto coopTypeAcc = spirv::CooperativeMatrixType::get(
+            f32Type, 16, 16, subgroupScope,
+            spirv::CooperativeMatrixUseKHR::MatrixAcc);
+        auto coopTypeResult = spirv::CooperativeMatrixType::get(
+            f16Type, 16, 16, subgroupScope,
+            spirv::CooperativeMatrixUseKHR::MatrixAcc);
 
-      // Store result to element pointer
-      spirv::KHRCooperativeMatrixStoreOp::create(
-          cmBuilder, cLoc, cPtrElem, narrowed, layoutAttr, stride,
-          /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+        // Get StorageBuffer pointers via AddressOf → AccessChain[0][0]
+        auto cst0 = cmBuilder.create<spirv::ConstantOp>(
+            cLoc, cmBuilder.getI32Type(), cmBuilder.getI32IntegerAttr(0));
 
-      callOp.erase();
+        auto getStorageBufferElemPtr = [&](spirv::GlobalVariableOp gv) -> Value {
+          auto addrOf = cmBuilder.create<spirv::AddressOfOp>(cLoc, gv);
+          auto elemPtrType = spirv::PointerType::get(
+              f16Type, spirv::StorageClass::StorageBuffer);
+          return cmBuilder.create<spirv::AccessChainOp>(
+              cLoc, elemPtrType, addrOf, ValueRange{cst0, cst0});
+        };
+
+        auto aPtrElem = getStorageBufferElemPtr(gvA);
+        auto bPtrElem = getStorageBufferElemPtr(gvB);
+        auto cPtrElem = getStorageBufferElemPtr(gvC);
+
+        auto strideVal = cmBuilder.create<spirv::ConstantOp>(
+            cLoc, cmBuilder.getI32Type(),
+            cmBuilder.getI32IntegerAttr(stride));
+        auto layoutAttr = spirv::CooperativeMatrixLayoutKHRAttr::get(
+            ctx, spirv::CooperativeMatrixLayoutKHR::RowMajor);
+
+        // Load A and B from StorageBuffer
+        auto loadA = spirv::KHRCooperativeMatrixLoadOp::create(
+            cmBuilder, cLoc, coopTypeA, aPtrElem, layoutAttr, strideVal,
+            /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+        auto loadB = spirv::KHRCooperativeMatrixLoadOp::create(
+            cmBuilder, cLoc, coopTypeB, bPtrElem, layoutAttr, strideVal,
+            /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+
+        // Zero accumulator
+        auto zeroF32 = cmBuilder.create<spirv::ConstantOp>(
+            cLoc, f32Type, cmBuilder.getF32FloatAttr(0.0f));
+        auto zeroAcc = cmBuilder.create<spirv::CompositeConstructOp>(
+            cLoc, coopTypeAcc, ValueRange{zeroF32});
+
+        // MulAdd: result = A * B + 0
+        auto mulAdd = spirv::KHRCooperativeMatrixMulAddOp::create(
+            cmBuilder, cLoc, coopTypeAcc,
+            loadA.getResult(), loadB.getResult(), zeroAcc,
+            /*matrix_operands=*/nullptr);
+
+        // Convert f32 accumulator to f16 for storage
+        auto narrowed = cmBuilder.create<spirv::FConvertOp>(
+            cLoc, coopTypeResult, mulAdd.getResult());
+
+        // Store to StorageBuffer directly
+        spirv::KHRCooperativeMatrixStoreOp::create(
+            cmBuilder, cLoc, cPtrElem, narrowed, layoutAttr, strideVal,
+            /*memory_operand=*/nullptr, /*alignment=*/nullptr);
+
+        callOp.erase();
+      }
     }
     // Remove coop matmul function declaration
     if (auto decl = dyn_cast_or_null<spirv::FuncOp>(

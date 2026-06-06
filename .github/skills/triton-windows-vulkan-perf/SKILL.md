@@ -1,6 +1,6 @@
 ---
 name: triton-windows-vulkan-perf
-description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, and 12 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the shared memory promotion pipeline, or planning future work."
+description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, cooperative matrix, and 17 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the buffer-forwarding architecture, or extending the pipeline."
 argument-hint: "workgroup-id | device-local | shared-memory | barriers | subgroup | traps | strategy"
 user-invocable: true
 ---
@@ -25,6 +25,7 @@ at a time. Every step is a working commit with 11/11 tests passing.
 | C+2 | Device-local memory | VulkanCompute.{h,cpp} | 1 | ✅ |
 | C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc, CMakeLists.txt | 8 | ✅ |
 | C+4 | Subgroup operations | PrepareSPIRV.cpp, VulkanCompute.{h,cpp}, triton_vulkan.cc | 2 | ✅ |
+| C+5 | Cooperative matrix | PrepareSPIRV.cpp, VulkanCompute.cpp, compiler.py, test | 5 | ✅ |
 
 ---
 
@@ -168,7 +169,7 @@ spirv.FunctionCall @__vulkan_barrier()
 # make_memref:
 one_shot_bufferize
 → convert_reduction_to_parallel   # linalg.reduce → tree reduction
-→ convert_matmul_to_cooperative   # linalg.matmul → coop placeholder (C+5)
+→ convert_matmul_to_cooperative   # linalg.matmul 16x16 f16 → coop placeholder
 → convert_linalg_to_loops
 → lower_affine → convert_scf_to_cf → canonicalize + cse
 
@@ -251,7 +252,55 @@ configurable via module attribute.
 
 ---
 
-## 6. Traps Reference (All 12)
+## 6. C+5: Cooperative Matrix (Buffer-Forwarding Architecture)
+
+**Goal:** Use `VK_KHR_cooperative_matrix` for 16×16 f16 matmul, loading tiles
+directly from StorageBuffer GlobalVariables (bypassing Function-class allocas).
+
+### Architecture
+
+The key innovation is **buffer-forwarding**: the cooperative matrix ops
+skip the alloca-copy pattern entirely and reference the original
+StorageBuffer GlobalVariables via module attributes.
+
+```
+ConvertMatmulToCooperative (runs after bufferize):
+  traces matmul operands backward: alloc → memref.copy → reinterpret_cast → func arg
+  stores vulkan.coop_buffer_args = [argA, argB, argC] on module
+  emits: call @__vulkan_coop_matmul()  (no operands!)
+
+VulkanizePass:
+  reads vulkan.coop_buffer_args → finds GlobalVariables @binding0/1/2
+  AccessChain @binding0[0][0] → spirv.ptr<f16, StorageBuffer>
+  KHRCooperativeMatrixLoad(ptr, RowMajor, stride)
+  KHRCooperativeMatrixMulAdd(A, B, zero_acc) → f32 result
+  FConvert f32→f16
+  KHRCooperativeMatrixStore(ptr, result, RowMajor, stride)
+```
+
+### What Changed
+
+| Component | Change |
+|-----------|--------|
+| `ConvertMatmulToCooperative` | `traceToFuncArg()` walks alloc→copy→reinterpret_cast→BlockArgument. No-arg placeholder. |
+| VulkanizePass | Maps `vulkan.coop_buffer_args` → GlobalVariables. AccessChain with `StorageBuffer` pointers. |
+| `createLogicalDevice` | Queries `vkEnumerateDeviceExtensionProperties`. Enables coop matrix only if supported. |
+| VCE triple | V_1_6 + CooperativeMatrixKHR + Float16 + StorageBuffer16BitAccess (conditional) |
+| Test | `matmul_coop_f16`: 16×16 f16 cooperative matmul, error ~0.015 |
+
+### The 5 Traps of C+5
+
+| # | Trap | Fix |
+|---|------|-----|
+| C5-1 | Function-class pointers crash `vkCreateComputePipelines` | Buffer-forwarding: use StorageBuffer GlobalVariables directly |
+| C5-2 | `FixAllocaStorageClass` rewrites placeholder declarations | No-arg placeholder eliminates the issue |
+| C5-3 | Unconditional extension enabling crashes unsupported GPUs | Query `vkEnumerateDeviceExtensionProperties` first |
+| C5-4 | Stride must match original matrix row length, not tile size | Store stride in `vulkan.coop_dims` attribute |
+| C5-5 | AccessChain result storage class must match base pointer | Use `spirv::StorageClass::StorageBuffer` explicitly |
+
+---
+
+## 7. Traps Reference (All 17)
 
 | ID | Category | One-liner |
 |----|----------|-----------|
@@ -267,10 +316,15 @@ configurable via module attribute.
 | C3-8 | MSVC | Missing `#include` causes cascading `auto` deduction failures |
 | C4-1 | Vulkan | `vkGetPhysicalDeviceProperties2` needs Vulkan 1.1 API version |
 | C4-2 | Synchronization | Missing barrier after subgroup reduce → race on shared[0] |
+| C5-1 | SPIR-V Spec | Function-class pointers invalid for cooperative matrix ops |
+| C5-2 | MLIR Pipeline | FixAllocaStorageClass rewrites placeholder declarations |
+| C5-3 | Vulkan | Unconditional extension enabling crashes unsupported GPUs |
+| C5-4 | Convention | Stride = matrix row length, not tile size |
+| C5-5 | SPIR-V | AccessChain result storage class must match base pointer |
 
 ---
 
-## 7. Strategy Lessons
+## 8. Strategy Lessons
 
 1. **Get it working first, then make it fast.** The base skill achieves
    correctness. This skill achieves performance. Never mix the two.
@@ -291,7 +345,7 @@ configurable via module attribute.
    survive through `convert-*-to-spirv`. Detect shared memory by matching
    array dimensions against known block size.
 
-6. **Test after EVERY change.** Run all 11 tests after every edit. The
+6. **Test after EVERY change.** Run all 12 tests after every edit. The
    pipeline is fragile — a change in arg layout breaks everything downstream.
 
 7. **Debug with `str_nodebug()` + regex.** Print IR at each pipeline step.
@@ -300,5 +354,8 @@ configurable via module attribute.
 
 8. **VCE triple must match actual ops.** `spirv.module` VCE triple must
    include capabilities for ALL ops used. Non-reduction shaders stay at
-   V_1_0. Subgroup ops bump to V_1_3. Set conditionally based on
-   `hasSubgroupOps` flag.
+   V_1_0. Subgroup ops bump to V_1_3. Coop matrix bumps to V_1_6.
+
+9. **Buffer-forwarding bypasses pipeline limitations.** When MLIR passes
+   force wrong storage classes, trace backward through the IR to find the
+   original buffer args and reference their GlobalVariables directly.
