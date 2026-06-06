@@ -2236,6 +2236,15 @@ dense splat tensors).
 pipeline works. Debug type conversion failures by printing the
 `adaptor.getOperands()` types vs. the original `op.getOperands()` types.
 
+**NEVER use `op.getXxx()` for operands in a ConversionPattern (G-6).** In an
+`OpConversionPattern`, the `TypeConverter` may have already converted operand
+types — e.g., `tensor<256xi1>` → `memref<256xi1>`. Calling `op.getMask()`
+returns the **original** tensor value, which is stale. Always use
+`adaptor.getMask()` to get the type-converted value. Use `op` only for
+attributes (`op.getLoc()`, `op.getAxis()`) and result types. This bug is
+silent until you actually _use_ the operand — if you just null-check it
+(`if (!mask)`), both versions work, hiding the problem.
+
 **The walk-then-erase pattern is fragile.** When walking the IR to modify
 or erase ops, always collect ops first, then process them. Erasing during
 a walk invalidates iterators. Use `llvm::make_early_inc_range` or collect
@@ -2274,7 +2283,41 @@ walkthrough, see `opencl-emitter-guide.md`.
 stages (e.g., wrong pointer analysis) manifest as wrong code in later stages
 (e.g., wrong SPIR-V). Print IR after each stage and verify it looks correct.
 
-### 20.4 On MSVC-Specific Issues
+### 20.4 On Correctness Pitfalls (Code Review Findings)
+
+A comprehensive code review after completing Path C+ revealed several
+correctness issues. These are now fixed but documented here to prevent
+recurrence:
+
+**Masked load/store must actually apply the mask (G-1).** The original
+`LoadConverter` filled the destination with the `other` value, then did a
+full `memref.copy` from the source — overwriting the fill, making the mask
+useless. The fix uses `linalg.generic` with `arith.select` to conditionally
+copy per element: `select(mask, source, other)`. Same pattern for stores:
+use `linalg.generic` to selectively write where mask is true.
+
+**Push-constant struct alignment matters (G-2).** SPIR-V requires each struct
+member to be aligned to its natural alignment. The original code packed offsets
+sequentially (0, 4, 8, ...) which is only correct for i32. With i64/f64 members,
+the offset must be aligned to 8 bytes: `offset = (offset + size - 1) & ~(size - 1)`.
+
+**Push constants are not interface variables (G-3).** The original code added
+the `__push_constants` global to the `spirv.EntryPoint` interface list. Per
+SPIR-V spec, only `StorageBuffer`/`Uniform`/`Input`/`Output` globals are
+interface variables. Push constants are accessed via the `PushConstant` storage
+class and are implicitly available.
+
+**Subgroup size is not universal (G-4).** NVIDIA = 32, AMD = 64, Intel = 8/16/32.
+The `ConvertReductionToParallel` pass now reads `vulkan.subgroup_size` from
+the module, defaulting to 32. Set this attribute from the runtime when targeting
+non-NVIDIA GPUs.
+
+**Reduce identity must match the combiner (G-5).** Using zero as the identity
+for `max` reduction produces wrong results (zero might be larger than all
+elements for negative inputs). The `ReduceConverter` now emits a warning for
+unrecognized combiners instead of silently returning zero.
+
+### 20.5 On MSVC-Specific Issues
 
 The Triton build on Windows (MSVC) has its own set of challenges documented
 in the build skill. The Vulkan backend adds:
@@ -2348,8 +2391,8 @@ in the build skill. The Vulkan backend adds:
 | `ReshapeConverter` | `tt.reshape` | `tensor.expand/collapse_shape` | TritonToLinalg conversion |
 | `DenseConstantConverter` | `arith.constant (splat)` | `tensor.empty + linalg.fill` | TritonToLinalg conversion |
 | `AddPtrConverter` | `tt.addptr` | `memref.reinterpret_cast` | Pointer analysis and memory ops |
-| `LoadConverter` | `tt.load` | `memref.alloc + fill + copy + to_tensor` | Pointer analysis and memory ops |
-| `StoreConverter` | `tt.store` | `materialize_in_destination` | Pointer analysis and memory ops |
+| `LoadConverter` | `tt.load` | `memref.alloc + fill + select(mask, src, other)` | Pointer analysis and memory ops |
+| `StoreConverter` | `tt.store` | `select(mask, val, existing) → dest` or `materialize_in_destination` | Pointer analysis and memory ops |
 | `ExpandReinterpretCast` | `memref.reinterpret_cast` | `memref.load/store with adjusted index` | SPIR-V conversion |
 | `ExpandMemRefCopy` | `memref.copy` | `scf.for { load; store }` | SPIR-V conversion |
 | `RemoveDealloc` | `memref.dealloc` | (erased) | SPIR-V conversion |

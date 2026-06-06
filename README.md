@@ -275,7 +275,7 @@ third_party/vulkan/
 |-------|---------|
 | `triton-windows-build` | LLVM + Triton build on Windows (MSVC patches, vcvars, build scripts) |
 | `triton-windows-vulkan` | Base backend: 16 converters, 7 bridge passes, VulkanizePass, runtime API |
-| `triton-windows-vulkan-perf` | C+1–C+5 performance roadmap, 17 documented traps, strategy lessons |
+| `triton-windows-vulkan-perf` | C+1–C+5 performance roadmap, 23 documented traps, strategy lessons |
 | `triton-windows-dev` | Testing, debugging, profiling |
 | `triton-windows-opencl` | Optional OpenCL debug emitters |
 

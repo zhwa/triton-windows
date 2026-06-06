@@ -53,7 +53,10 @@ void VulkanCompute::pickPhysicalDevice() {
     }
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
-    vkEnumeratePhysicalDevices(instance_, &deviceCount, devices.data());
+    VkResult res = vkEnumeratePhysicalDevices(instance_, &deviceCount, devices.data());
+    if (res != VK_SUCCESS) {
+        throw std::runtime_error("Failed to enumerate Vulkan physical devices");
+    }
 
     // Pick first device with a compute queue
     for (auto& dev : devices) {
@@ -70,6 +73,7 @@ void VulkanCompute::pickPhysicalDevice() {
 
                 VkPhysicalDeviceProperties props;
                 vkGetPhysicalDeviceProperties(dev, &props);
+                physicalDeviceProperties_ = props;
                 deviceName_ = props.deviceName;
 
                 // Query subgroup size (Vulkan 1.1+)
@@ -201,85 +205,97 @@ size_t VulkanCompute::createBuffer(uint32_t binding, size_t sizeBytes) {
     info.binding = binding;
     info.size = sizeBytes;
 
-    // Try device-local memory for the storage buffer (fast VRAM on discrete GPUs).
-    // The buffer needs TRANSFER_DST (for writeBuffer) and TRANSFER_SRC (for readBuffer).
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = sizeBytes;
-    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    try {
+        // Try device-local memory for the storage buffer (fast VRAM on discrete GPUs).
+        // The buffer needs TRANSFER_DST (for writeBuffer) and TRANSFER_SRC (for readBuffer).
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeBytes;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    vkCheck(vkCreateBuffer(device_, &bufferInfo, nullptr, &info.buffer),
-            "Failed to create buffer");
+        vkCheck(vkCreateBuffer(device_, &bufferInfo, nullptr, &info.buffer),
+                "Failed to create buffer");
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device_, info.buffer, &memReqs);
+        VkMemoryRequirements memReqs;
+        vkGetBufferMemoryRequirements(device_, info.buffer, &memReqs);
 
-    // Try device-local (non-host-visible) memory first
-    int32_t deviceLocalIdx = findMemoryTypeFallback(
-        memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        // Try device-local (non-host-visible) memory first
+        int32_t deviceLocalIdx = findMemoryTypeFallback(
+            memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (deviceLocalIdx >= 0) {
-        // Device-local memory available — use it + create staging buffer
-        info.deviceLocal = true;
+        if (deviceLocalIdx >= 0) {
+            // Device-local memory available — use it + create staging buffer
+            info.deviceLocal = true;
 
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = static_cast<uint32_t>(deviceLocalIdx);
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memReqs.size;
+            allocInfo.memoryTypeIndex = static_cast<uint32_t>(deviceLocalIdx);
 
-        vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
-                "Failed to allocate device-local buffer memory");
-        vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
-                "Failed to bind device-local buffer memory");
+            vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
+                    "Failed to allocate device-local buffer memory");
+            vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
+                    "Failed to bind device-local buffer memory");
 
-        // Create host-visible staging buffer for transfers
-        VkBufferCreateInfo stagingInfo{};
-        stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        stagingInfo.size = sizeBytes;
-        stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            // Create host-visible staging buffer for transfers
+            VkBufferCreateInfo stagingInfo{};
+            stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            stagingInfo.size = sizeBytes;
+            stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-        vkCheck(vkCreateBuffer(device_, &stagingInfo, nullptr, &info.staging),
-                "Failed to create staging buffer");
+            vkCheck(vkCreateBuffer(device_, &stagingInfo, nullptr, &info.staging),
+                    "Failed to create staging buffer");
 
-        VkMemoryRequirements stagingReqs;
-        vkGetBufferMemoryRequirements(device_, info.staging, &stagingReqs);
+            VkMemoryRequirements stagingReqs;
+            vkGetBufferMemoryRequirements(device_, info.staging, &stagingReqs);
 
-        VkMemoryAllocateInfo stagingAlloc{};
-        stagingAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        stagingAlloc.allocationSize = stagingReqs.size;
-        stagingAlloc.memoryTypeIndex = findMemoryType(
-            stagingReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkMemoryAllocateInfo stagingAlloc{};
+            stagingAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            stagingAlloc.allocationSize = stagingReqs.size;
+            stagingAlloc.memoryTypeIndex = findMemoryType(
+                stagingReqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-        vkCheck(vkAllocateMemory(device_, &stagingAlloc, nullptr, &info.stagingMemory),
-                "Failed to allocate staging buffer memory");
-        vkCheck(vkBindBufferMemory(device_, info.staging, info.stagingMemory, 0),
-                "Failed to bind staging buffer memory");
-    } else {
-        // No device-local memory (integrated GPU) — fall back to host-visible
-        info.deviceLocal = false;
+            vkCheck(vkAllocateMemory(device_, &stagingAlloc, nullptr, &info.stagingMemory),
+                    "Failed to allocate staging buffer memory");
+            vkCheck(vkBindBufferMemory(device_, info.staging, info.stagingMemory, 0),
+                    "Failed to bind staging buffer memory");
+        } else {
+            // No device-local memory (integrated GPU) — fall back to host-visible
+            info.deviceLocal = false;
 
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = findMemoryType(
-            memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memReqs.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                memReqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-        vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
-                "Failed to allocate buffer memory");
-        vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
-                "Failed to bind buffer memory");
+            vkCheck(vkAllocateMemory(device_, &allocInfo, nullptr, &info.memory),
+                    "Failed to allocate buffer memory");
+            vkCheck(vkBindBufferMemory(device_, info.buffer, info.memory, 0),
+                    "Failed to bind buffer memory");
+        }
+
+        size_t index = buffers_.size();
+        buffers_.push_back(info);
+        return index;
+    } catch (...) {
+        if (info.staging != VK_NULL_HANDLE)
+            vkDestroyBuffer(device_, info.staging, nullptr);
+        if (info.stagingMemory != VK_NULL_HANDLE)
+            vkFreeMemory(device_, info.stagingMemory, nullptr);
+        if (info.buffer != VK_NULL_HANDLE)
+            vkDestroyBuffer(device_, info.buffer, nullptr);
+        if (info.memory != VK_NULL_HANDLE)
+            vkFreeMemory(device_, info.memory, nullptr);
+        throw;
     }
-
-    size_t index = buffers_.size();
-    buffers_.push_back(info);
-    return index;
 }
 
 void VulkanCompute::writeBuffer(size_t bufferIndex, const void* data, size_t sizeBytes) {
@@ -356,88 +372,121 @@ void VulkanCompute::buildPipeline() {
     layoutInfo.bindingCount = static_cast<uint32_t>(layoutBindings.size());
     layoutInfo.pBindings = layoutBindings.data();
 
-    vkCheck(vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &descriptorSetLayout_),
-            "Failed to create descriptor set layout");
+    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
 
-    // 2. Create pipeline layout (with push constants if needed)
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout_;
+    try {
+        vkCheck(vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &descriptorSetLayout),
+                "Failed to create descriptor set layout");
 
-    VkPushConstantRange pushConstRange{};
-    if (!pushConstantData_.empty()) {
-        pushConstRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pushConstRange.offset = 0;
-        pushConstRange.size = static_cast<uint32_t>(pushConstantData_.size());
-        pipelineLayoutInfo.pushConstantRangeCount = 1;
-        pipelineLayoutInfo.pPushConstantRanges = &pushConstRange;
+        // 2. Create pipeline layout (with push constants if needed)
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+
+        VkPushConstantRange pushConstRange{};
+        if (!pushConstantData_.empty()) {
+            const uint32_t pushConstantSize = static_cast<uint32_t>(pushConstantData_.size());
+            if (pushConstantSize > physicalDeviceProperties_.limits.maxPushConstantsSize) {
+                throw std::runtime_error(
+                    "Push constant size (" + std::to_string(pushConstantSize) +
+                    " bytes) exceeds device limit (" +
+                    std::to_string(physicalDeviceProperties_.limits.maxPushConstantsSize) +
+                    " bytes)");
+            }
+
+            pushConstRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            pushConstRange.offset = 0;
+            pushConstRange.size = pushConstantSize;
+            pipelineLayoutInfo.pushConstantRangeCount = 1;
+            pipelineLayoutInfo.pPushConstantRanges = &pushConstRange;
+        }
+
+        vkCheck(vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout),
+                "Failed to create pipeline layout");
+
+        // 3. Create compute pipeline
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = shaderModule_;
+        stageInfo.pName = entryPoint_.c_str();
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = stageInfo;
+        pipelineInfo.layout = pipelineLayout;
+
+        vkCheck(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline),
+                "Failed to create compute pipeline");
+
+        // 4. Create descriptor pool
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSize.descriptorCount = static_cast<uint32_t>(buffers_.size());
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+
+        vkCheck(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool),
+                "Failed to create descriptor pool");
+
+        // 5. Allocate descriptor set
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &descriptorSetLayout;
+
+        vkCheck(vkAllocateDescriptorSets(device_, &allocInfo, &descriptorSet),
+                "Failed to allocate descriptor set");
+
+        // 6. Update descriptor set with buffer bindings
+        std::vector<VkDescriptorBufferInfo> bufferInfos(buffers_.size());
+        std::vector<VkWriteDescriptorSet> descriptorWrites(buffers_.size());
+
+        for (size_t i = 0; i < buffers_.size(); ++i) {
+            bufferInfos[i].buffer = buffers_[i].buffer;
+            bufferInfos[i].offset = 0;
+            bufferInfos[i].range = buffers_[i].size;
+
+            descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[i].pNext = nullptr;
+            descriptorWrites[i].dstSet = descriptorSet;
+            descriptorWrites[i].dstBinding = buffers_[i].binding;
+            descriptorWrites[i].dstArrayElement = 0;
+            descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[i].descriptorCount = 1;
+            descriptorWrites[i].pBufferInfo = &bufferInfos[i];
+        }
+
+        vkUpdateDescriptorSets(device_,
+                               static_cast<uint32_t>(descriptorWrites.size()),
+                               descriptorWrites.data(), 0, nullptr);
+
+        descriptorSetLayout_ = descriptorSetLayout;
+        pipelineLayout_ = pipelineLayout;
+        pipeline_ = pipeline;
+        descriptorPool_ = descriptorPool;
+        descriptorSet_ = descriptorSet;
+    } catch (...) {
+        if (descriptorPool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(device_, descriptorPool, nullptr);
+        if (pipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_, pipeline, nullptr);
+        if (pipelineLayout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(device_, pipelineLayout, nullptr);
+        if (descriptorSetLayout != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(device_, descriptorSetLayout, nullptr);
+        throw;
     }
-
-    vkCheck(vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_),
-            "Failed to create pipeline layout");
-
-    // 3. Create compute pipeline
-    VkPipelineShaderStageCreateInfo stageInfo{};
-    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stageInfo.module = shaderModule_;
-    stageInfo.pName = entryPoint_.c_str();
-
-    VkComputePipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipelineInfo.stage = stageInfo;
-    pipelineInfo.layout = pipelineLayout_;
-
-    vkCheck(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_),
-            "Failed to create compute pipeline");
-
-    // 4. Create descriptor pool
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSize.descriptorCount = static_cast<uint32_t>(buffers_.size());
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-
-    vkCheck(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool_),
-            "Failed to create descriptor pool");
-
-    // 5. Allocate descriptor set
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptorPool_;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &descriptorSetLayout_;
-
-    vkCheck(vkAllocateDescriptorSets(device_, &allocInfo, &descriptorSet_),
-            "Failed to allocate descriptor set");
-
-    // 6. Update descriptor set with buffer bindings
-    std::vector<VkDescriptorBufferInfo> bufferInfos(buffers_.size());
-    std::vector<VkWriteDescriptorSet> descriptorWrites(buffers_.size());
-
-    for (size_t i = 0; i < buffers_.size(); ++i) {
-        bufferInfos[i].buffer = buffers_[i].buffer;
-        bufferInfos[i].offset = 0;
-        bufferInfos[i].range = buffers_[i].size;
-
-        descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[i].pNext = nullptr;
-        descriptorWrites[i].dstSet = descriptorSet_;
-        descriptorWrites[i].dstBinding = buffers_[i].binding;
-        descriptorWrites[i].dstArrayElement = 0;
-        descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[i].descriptorCount = 1;
-        descriptorWrites[i].pBufferInfo = &bufferInfos[i];
-    }
-
-    vkUpdateDescriptorSets(device_,
-                           static_cast<uint32_t>(descriptorWrites.size()),
-                           descriptorWrites.data(), 0, nullptr);
 }
 
 void VulkanCompute::setPushConstants(const void* data, size_t sizeBytes) {

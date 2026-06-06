@@ -221,6 +221,7 @@ Falls back to host-visible-only on integrated GPUs. BAR memory
 | `bufferization::ToTensorOp` | Explicit result type arg: `create(loc, tensorType, buf, ...)` |
 | `bufferization::ToBufferOp` | NOT `ToMemrefOp` in this LLVM version |
 | `ResourceLimitsAttr::get` | 4th arg: `Builder(ctx).getI32ArrayAttr({128,128,64})` |
+| `OpConversionPattern` operands | **Always use `adaptor.getXxx()`, never `op.getXxx()`** for operands. The TypeConverter may have changed operand types (e.g., `tensor<Nxi1>` → `memref<Nxi1>`). Using `op.getXxx()` references the original stale value. (Trap G-6) |
 
 ---
 
@@ -257,6 +258,21 @@ These are current limitations in the codebase, not bugs:
 | `LowerUnrankedCast` dead code | `PrepareSPIRV.cpp` | Defined but always returns `failure()`; never contributes |
 | `vkQueueWaitIdle` per transfer | `VulkanCompute.cpp` copyBuffer | Serializes transfers; optimize with batched command buffers later |
 | `ConvertReductionToParallel` 1D-only | `PrepareSPIRV.cpp` | Only handles 1D static power-of-2 reductions |
+| `memref.copy` expansion 1D-only | `PrepareSPIRV.cpp` | Multi-dim or dynamic copies remain unlowered |
+| 2D flattening rank-2 static only | `PrepareSPIRV.cpp` | Other ranks/dynamic shapes fall through |
+| Subgroup size default 32 | `PrepareSPIRV.cpp` | Set `vulkan.subgroup_size` module attribute for non-NVIDIA GPUs |
+| `driver.py` is a stub | `backend/driver.py` | `is_active()` always returns False; manual test flow only |
+
+### Correctness Invariants (must not violate)
+
+| Rule | Why | Trap ID |
+|------|-----|---------|
+| Masked load must conditionally copy per element | Full `memref.copy` ignores mask → wrong for non-aligned sizes | G-1 |
+| Masked store must conditionally write per element | Full `MaterializeInDestination` ignores mask | G-1 |
+| Push-constant struct members must be naturally aligned | Packed offsets violate SPIR-V alignment rules for i64/f64 | G-2 |
+| Push constants are NOT interface variables | Adding to `spirv.EntryPoint` interface list is invalid SPIR-V | G-3 |
+| Reduce identity must match combiner op | Zero identity is wrong for min (should be +inf) and max (-inf) | G-5 |
+| In `OpConversionPattern`, always use `adaptor.getXxx()` | `op.getXxx()` returns stale pre-conversion values (e.g., tensor instead of memref) | G-6 |
 
 For performance-related items (shared memory, subgroups, cooperative matrix), see
 the `triton-windows-vulkan-perf` skill.

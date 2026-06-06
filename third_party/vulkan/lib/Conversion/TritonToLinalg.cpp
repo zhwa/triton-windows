@@ -464,6 +464,9 @@ struct ReduceConverter : public OpConversionPattern<triton::ReduceOp> {
               loc, cast<TypedAttr>(builder.getZeroAttr(elementType)));
         })
         .Default([&](Operation *op) -> Value {
+          op->emitWarning("Unknown reduce combiner — using zero identity. "
+                          "This may produce incorrect results for min/max or "
+                          "custom combiners.");
           return builder.create<arith::ConstantOp>(
               loc, cast<TypedAttr>(builder.getZeroAttr(elementType)));
         });
@@ -1020,8 +1023,8 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
   matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto ptr = adaptor.getPtr();
-    auto mask = op.getMask();
-    auto other = op.getOther();
+    auto mask = adaptor.getMask();
+    auto other = adaptor.getOther();
     auto loc = op.getLoc();
 
     // Scalar load
@@ -1059,19 +1062,16 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
       // Unmasked load: straight copy
       rewriter.create<memref::CopyOp>(loc, ptr, alloc);
     } else {
-      // Masked load: fill with 'other' value first, then copy valid region.
-      // Fill with zero if no 'other' provided, then do full copy.
-      // This is correct for the common case where mask is a bounds check
-      // and we're inside the valid region.
+      // Masked load: fill with 'other' value first, then conditionally
+      // copy from source only where mask is true.
+      // Step 1: Fill alloc with 'other' (or zero if no 'other' provided)
+      auto elemType = memrefType.getElementType();
       if (other) {
-        // Try to extract scalar from 'other'
         auto otherVal = other;
         if (auto splatOp = otherVal.getDefiningOp<triton::SplatOp>())
           otherVal = splatOp.getSrc();
         if (isa<ShapedType>(otherVal.getType())) {
-          // Can't extract scalar — just fill with zero
           TypedAttr zeroAttr;
-          auto elemType = memrefType.getElementType();
           if (isa<FloatType>(elemType))
             zeroAttr = rewriter.getFloatAttr(elemType, 0.0);
           else
@@ -1084,9 +1084,7 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
                                           ValueRange{alloc});
         }
       } else {
-        // No 'other' — fill with zero
         TypedAttr zeroAttr;
-        auto elemType = memrefType.getElementType();
         if (isa<FloatType>(elemType))
           zeroAttr = rewriter.getFloatAttr(elemType, 0.0);
         else
@@ -1095,10 +1093,37 @@ struct LoadConverter : public OpConversionPattern<triton::LoadOp> {
         rewriter.create<linalg::FillOp>(loc, ValueRange{zero},
                                         ValueRange{alloc});
       }
-      // Copy from source — do full copy (mask check is on the
-      // producer side). Full MaskAnalysis for subview-based partial copy
-      // will come later.
-      rewriter.create<memref::CopyOp>(loc, ptr, alloc);
+
+      // Step 2: Conditional copy — use linalg.generic with arith.select
+      // to copy from source only where mask is true, keeping the 'other'
+      // fill value where mask is false.
+      // The TypeConverter converts tensor<Nxi1> → memref<Nxi1>, so
+      // adaptor.getMask() is already a memref. Cast to the expected type
+      // if shapes/element types match but the memref type differs.
+      Value maskMemref = mask;
+      auto maskMemrefType = MemRefType::get(memrefType.getShape(),
+                                            rewriter.getI1Type());
+      if (maskMemref.getType() != maskMemrefType)
+        maskMemref = rewriter.create<memref::CastOp>(loc, maskMemrefType,
+                                                      maskMemref);
+
+      unsigned rank = memrefType.getRank();
+      auto ctx = rewriter.getContext();
+      SmallVector<AffineMap> maps(
+          3, AffineMap::getMultiDimIdentityMap(rank, ctx));
+      SmallVector<utils::IteratorType> iterTypes(
+          rank, utils::IteratorType::parallel);
+
+      rewriter.create<linalg::GenericOp>(
+          loc, /*resultTypes=*/TypeRange{},
+          /*inputs=*/ValueRange{maskMemref, ptr},
+          /*outputs=*/ValueRange{alloc}, maps, iterTypes,
+          [](OpBuilder &b, Location l, ValueRange args) {
+            // args[0]: mask (i1), args[1]: source, args[2]: other (from fill)
+            auto selected =
+                b.create<arith::SelectOp>(l, args[0], args[1], args[2]);
+            b.create<linalg::YieldOp>(l, ValueRange{selected});
+          });
     }
 
     Value tensor = rewriter.create<bufferization::ToTensorOp>(
@@ -1117,7 +1142,7 @@ struct StoreConverter : public OpConversionPattern<triton::StoreOp> {
                   ConversionPatternRewriter &rewriter) const override {
     auto ptr = adaptor.getPtr();
     auto val = adaptor.getValue();
-    auto mask = op.getMask();
+    auto mask = adaptor.getMask();
     auto loc = op.getLoc();
 
     // Scalar store
@@ -1146,13 +1171,47 @@ struct StoreConverter : public OpConversionPattern<triton::StoreOp> {
               loc, val, ptr);
       storeOp.setWritable(true);
     } else {
-      // Masked store — do full store (mask check is on the
-      // producer side). Full MaskAnalysis for subview-based partial store
-      // will come later.
-      auto storeOp =
-          rewriter.create<bufferization::MaterializeInDestinationOp>(
-              loc, val, ptr);
-      storeOp.setWritable(true);
+      // Masked store: only write elements where mask is true.
+      // Use linalg.generic to select between new value and existing
+      // destination value based on mask, then materialize the result.
+      auto memrefType = dyn_cast<MemRefType>(ptr.getType());
+      if (!memrefType)
+        return rewriter.notifyMatchFailure(op, "expected memref for masked store");
+
+      // adaptor.getMask() is a memref (TypeConverter converts tensor → memref)
+      Value maskMemref = mask;
+      auto maskMemrefType = MemRefType::get(memrefType.getShape(),
+                                            rewriter.getI1Type());
+      if (maskMemref.getType() != maskMemrefType)
+        maskMemref = rewriter.create<memref::CastOp>(loc, maskMemrefType,
+                                                      maskMemref);
+
+      // adaptor.getValue() may be a tensor or memref depending on conversion
+      Value valMemref = val;
+      if (isa<RankedTensorType>(val.getType()))
+        valMemref = rewriter.create<bufferization::ToMemrefOp>(
+            loc, memrefType, val);
+      else if (val.getType() != memrefType)
+        valMemref = rewriter.create<memref::CastOp>(loc, memrefType, val);
+
+      unsigned rank = memrefType.getRank();
+      auto ctx = rewriter.getContext();
+      SmallVector<AffineMap> maps(
+          3, AffineMap::getMultiDimIdentityMap(rank, ctx));
+      SmallVector<utils::IteratorType> iterTypes(
+          rank, utils::IteratorType::parallel);
+
+      // In-place update of ptr: where mask=true write val, else keep existing
+      rewriter.create<linalg::GenericOp>(
+          loc, /*resultTypes=*/TypeRange{},
+          /*inputs=*/ValueRange{maskMemref, valMemref},
+          /*outputs=*/ValueRange{ptr}, maps, iterTypes,
+          [](OpBuilder &b, Location l, ValueRange args) {
+            // args[0]: mask (i1), args[1]: new value, args[2]: existing dest
+            auto selected =
+                b.create<arith::SelectOp>(l, args[0], args[1], args[2]);
+            b.create<linalg::YieldOp>(l, ValueRange{selected});
+          });
     }
 
     rewriter.eraseOp(op);

@@ -72,6 +72,7 @@ private:
     VkQueue computeQueue_ = VK_NULL_HANDLE;
     uint32_t computeQueueFamily_ = 0;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties physicalDeviceProperties_{};
     std::string deviceName_;
     uint32_t subgroupSize_ = 32;  // default, queried at init
 

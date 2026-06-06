@@ -658,12 +658,13 @@ public:
       emitBarrier(builder, loc);
 
       // Determine subgroup size for optimization.
-      // If blockSize > subgroupSize AND the combiner maps to a known
-      // subgroup op, use shared memory tree reduction for outer strides
-      // (>= subgroupSize) and a single subgroup reduce for inner strides.
-      // Otherwise, fall back to full shared memory tree reduction.
-      // TODO: make configurable via module attribute instead of hardcoding.
-      constexpr int64_t SUBGROUP_SIZE = 32; // Turing/Ampere/Hopper
+      // Read from module attribute if set by the compiler, otherwise default
+      // to 32 (NVIDIA Turing/Ampere/Hopper). AMD GPUs use 64, Intel uses
+      // 8/16/32 — set vulkan.subgroup_size on the module to override.
+      int64_t SUBGROUP_SIZE = 32;
+      if (auto attr = func->getParentOfType<ModuleOp>()
+                          ->getAttrOfType<IntegerAttr>("vulkan.subgroup_size"))
+        SUBGROUP_SIZE = attr.getInt();
 
       // Classify combiner op for subgroup reduce placeholder
       auto *combiner = reduceOp.getCombiner().front().getTerminator();
@@ -1215,16 +1216,19 @@ public:
       for (auto idx : pushConstArgIndices)
         memberTypes.push_back(funcType.getInput(idx));
 
-      // Create struct with Offset decorations based on actual type sizes
+      // Create struct with Offset decorations based on actual type sizes.
+      // SPIR-V requires each member to be aligned to its natural alignment.
       SmallVector<spirv::StructType::OffsetInfo> offsets;
       unsigned currentOffset = 0;
       for (unsigned i = 0; i < memberTypes.size(); i++) {
-        offsets.push_back(currentOffset);
-        unsigned typeSize = 4; // default i32
+        unsigned typeSize = 4; // default i32/f32
         if (memberTypes[i].isInteger(64) || memberTypes[i].isF64())
           typeSize = 8;
         else if (memberTypes[i].isInteger(16) || memberTypes[i].isF16())
           typeSize = 2;
+        // Align offset to natural alignment of the type
+        currentOffset = (currentOffset + typeSize - 1) & ~(typeSize - 1);
+        offsets.push_back(currentOffset);
         currentOffset += typeSize;
       }
 
@@ -1239,9 +1243,9 @@ public:
       auto *pcOp = builder.create(pcState);
       pushConstVar = cast<spirv::GlobalVariableOp>(pcOp);
 
-      // Add to interface variables
-      interfaceVarRefs.push_back(
-          FlatSymbolRefAttr::get(ctx, pushConstVar.getSymName()));
+      // Note: push constants are NOT interface variables in SPIR-V.
+      // Do not add to interfaceVarRefs — only storage buffer globals
+      // and builtins belong there.
     }
 
     // Replace arg uses: buffer args → addressof

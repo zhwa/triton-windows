@@ -1,6 +1,6 @@
 ---
 name: triton-windows-vulkan-perf
-description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, cooperative matrix, and 17 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the buffer-forwarding architecture, or extending the pipeline."
+description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, cooperative matrix, and 23 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the buffer-forwarding architecture, or extending the pipeline."
 argument-hint: "workgroup-id | device-local | shared-memory | barriers | subgroup | traps | strategy"
 user-invocable: true
 ---
@@ -346,7 +346,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 ---
 
-## 7. Traps Reference (All 17)
+## 7. Traps Reference (All 23)
 
 | ID | Category | One-liner |
 |----|----------|-----------|
@@ -367,6 +367,12 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 | C5-3 | Vulkan | Unconditional extension enabling crashes unsupported GPUs |
 | C5-4 | Convention | Stride = matrix row length, not tile size |
 | C5-5 | SPIR-V | AccessChain result storage class must match base pointer |
+| G-1 | Correctness | Masked load/store must apply mask — never do full copy/store |
+| G-2 | SPIR-V Spec | Push-constant struct needs natural alignment per member type |
+| G-3 | SPIR-V Spec | Push constants are NOT interface variables in EntryPoint |
+| G-4 | Portability | Subgroup size varies by vendor (NVIDIA=32, AMD=64, Intel=8–32) |
+| G-5 | Correctness | Reduce identity must match combiner — zero is wrong for min/max |
+| G-6 | MLIR API | In ConversionPattern, use `adaptor.getXxx()` not `op.getXxx()` for operands |
 
 ---
 
