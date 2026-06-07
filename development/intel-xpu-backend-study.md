@@ -4,6 +4,9 @@
 examined as a reference for building a real SPIR-V backend for triton-windows
 (beyond the current Linalg→SPIR-V pipeline).
 
+This study was conducted at a specific point in time. The architectural
+conclusions remain valid, but specific code references may have drifted.
+
 **Audience:** Compiler engineers working on the Vulkan/SPIR-V backend who
 want to understand what a production-grade SPIR-V backend looks like, what
 we can borrow from Intel's approach, and what's fundamentally different
@@ -46,10 +49,10 @@ Key insights for our project:
 
 2. **The heavy lifting is in TTGIR → LLVM-IR.** This is where thread/workgroup
    mapping, shared memory allocation, matrix multiply (DPAS), and memory
-   coalescing happen. It's ~30,000+ lines of C++ across dozens of files.
+   coalescing happen. It's a large codebase across dozens of files.
 
-3. **The SPIR-V translation itself is thin** — `SPIRVTranslation.cpp` is ~200
-   lines. The real complexity is upstream in LLVM-IR generation.
+3. **The SPIR-V translation itself is thin** — `SPIRVTranslation.cpp` is a
+   small amount of code. The real complexity is upstream in LLVM-IR generation.
 
 4. **For our NVIDIA+Vulkan target, we cannot reuse Intel's TTGIR.** Their
    TTGIR encodes Intel-specific concepts (DPAS layouts, subgroup sizes,
@@ -127,7 +130,7 @@ def add_stages(self, stages, options, language):
         stages["zebin"] = lambda src, metadata: self.make_zebin(src, metadata, options)
 ```
 
-Five stages: `ttir → ttgir → llir → spv → zebin` (optional native binary).
+The pipeline stages are `ttir → ttgir → llir → spv → zebin` (optional native binary).
 
 ### Stage 1: `make_ttir` — Triton IR Optimization
 
@@ -348,7 +351,7 @@ but it delegates to 30+ pattern files). Key responsibilities:
 3. **Function lowering**: Converts `tt.func` to `llvm.func` with correct
    calling conventions
 4. **Op conversion**: Delegates to type-specific patterns via
-   `pipelineManager.populateConversionPatterns()`
+   the pattern population entry point
 
 ### Target Info Abstraction
 
@@ -768,9 +771,9 @@ compute semantics.
 
 Since the original study, significant progress has been made:
 - **Path C is complete.** VulkanizePass, push constants, VulkanCompute
-  runtime all working. 9/9 kernels dispatching via native Vulkan SPIR-V.
-- **Path B is complete.** Serial (14 tests) + parallel (10 tests) OpenCL
-  emitters working. Useful for debugging but not production.
+  runtime all working. All kernels dispatching via native Vulkan SPIR-V.
+- **Path B is complete.** Serial and parallel OpenCL emitters are working.
+  Useful for debugging but not production.
 - The question now is: **should we pursue Path A (TTGIR→LLVM→SPIR-V)?**
 
 ### Deep Analysis: Why Intel's Approach Doesn't Transfer
@@ -780,11 +783,11 @@ study of the actual intrinsic dependencies, **this recommendation is revised.**
 
 #### Intel's Code Is 80% Intel-Specific
 
-| Component | Lines | Intel-Specific? |
+| Component | Scale | Intel-Specific? |
 |-----------|-------|-----------------|
-| `TritonIntelGPUToLLVM/` | 7,318 | ~80% (DPAS, 2D block load, Xe asm, SPV_INTEL_*) |
-| `TritonNVIDIAGPUToLLVM/` | 7,050 | ~85% (PTX inline asm, NVVM intrinsics) |
-| Generic `TritonGPUToLLVM/` | 9,081 | ~55-60% generic, 40-45% vendor stubs |
+| `TritonIntelGPUToLLVM/` | Large | ~80% (DPAS, 2D block load, Xe asm, SPV_INTEL_*) |
+| `TritonNVIDIAGPUToLLVM/` | Large | ~85% (PTX inline asm, NVVM intrinsics) |
+| Generic `TritonGPUToLLVM/` | Substantial generic implementation | ~55-60% generic, 40-45% vendor stubs |
 
 Intel's path cannot be "followed." Their code assumes Intel hardware
 intrinsics that don't exist on NVIDIA: DPAS matrix engines, 2D block
@@ -836,7 +839,7 @@ Even if you got clean LLVM-IR, translating to Vulkan SPIR-V requires:
 
 #### The Generic TritonGPU→LLVM Can't Stand Alone
 
-The 9,081-line generic `TritonGPUToLLVM` code is ~55-60% generic but
+The generic `TritonGPUToLLVM` implementation is ~55-60% generic but
 **requires a vendor backend** to fill the remaining 40-45%:
 - `TargetInfo` interface: thread/block IDs, barrier, shuffle, printf
 - Vendor-specific allocation: shared memory sizing, register pressure
@@ -858,14 +861,14 @@ December 2025. No SPIR-V output path. Not viable as a foundation.
 | **A** | TTGIR → LLVM → SPIR-V (fork NVIDIA) | ~10-15K lines, 3-6 months | 50-80% CUDA | **Very High** | ❌ Not now |
 | **A-lite** | Same but SM 7.x only, no TMA/async | ~8K lines, 2-3 months | 30-50% CUDA | High | ❌ Poor ROI |
 | **B** | TTIR → Linalg → OpenCL C text | Done | 0.04-10% CUDA | None | ✅ Done (debug tool) |
-| **C** | TTIR → Linalg → MLIR SPIR-V → Vulkan | Done (9/9 kernels) | 5-20% CUDA | None | ✅ Done |
+| **C** | TTIR → Linalg → MLIR SPIR-V → Vulkan | Done (all kernels) | 5-20% CUDA | None | ✅ Done |
 | **C+** | Path C + incremental GPU features | ~2-4K lines, 4-8 weeks | **20-40% CUDA** | **Low** | ✅ **Recommended** |
 
 ### Path C+ Details (Completed)
 
 The MLIR SPIR-V pipeline has been enhanced with GPU compute features through
-five incremental steps (C+1 through C+5), all now complete and passing 12/12
-tests. No TTGIR, no LLVM-IR, no vendor-specific code — just standard MLIR
+incremental steps (C+1 through C+5), all now complete and passing the current
+test suite. No TTGIR, no LLVM-IR, no vendor-specific code — just standard MLIR
 passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
 
 **Confirmed: RTX 2080 Ti (Turing) supports these Vulkan extensions:**
@@ -986,10 +989,10 @@ If/when Path A is pursued, here's the honest breakdown:
 
 | Component | Intel (Production) | Ours (Current) |
 |-----------|-------------------|----------------|
-| Pipeline stages | 5 (ttir→ttgir→llir→spv→zebin) | 4 (ttir→linalg→memref→opencl) |
+| Pipeline flow | ttir→ttgir→llir→spv→zebin | ttir→linalg→memref→opencl |
 | C++ conversion code | ~50,000 lines | ~1,400 lines |
 | SPIR-V generation | LLVM-IR → llvm-spirv | regex emitter → OpenCL C |
 | GPU scheduling | Full (coalesce, pipeline, prefetch) | None (1:1 element mapping) |
 | Subgroup ops | Hardware shuffle | __local + barrier |
-| Tests | Thousands | 14 serial + 10 parallel |
+| Tests | Thousands | serial and parallel OpenCL suites |
 | Performance vs CUDA | ~80-95% | ~0.04-10% |

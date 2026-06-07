@@ -1,6 +1,6 @@
 ---
 name: triton-windows-vulkan-perf
-description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, cooperative matrix, and 23 documented traps. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the buffer-forwarding architecture, or extending the pipeline."
+description: "Incremental Vulkan/SPIR-V performance improvements (Path C+). Covers WorkgroupId dispatch, device-local memory, shared memory tree reductions, subgroup operations, cooperative matrix, and documented traps and strategy lessons. Use for: adding Vulkan compute features, fixing SPIR-V conversion issues, understanding the buffer-forwarding architecture, or extending the pipeline."
 argument-hint: "workgroup-id | device-local | shared-memory | barriers | subgroup | traps | strategy"
 user-invocable: true
 ---
@@ -12,10 +12,11 @@ Vulkan compute feature while preserving all existing tests.
 
 **Philosophy:** _"Premature optimization is the root of all evil."_ — Knuth.
 Get correctness first (base skill), then improve performance one feature
-at a time. Every step is a working commit with 12/12 tests passing.
+at a time. Every step is a working commit with all Vulkan tests passing
+(run `python third_party/vulkan/test/test_kernels_vulkan.py` to verify).
 
 **Prerequisite:** The base `triton-windows-vulkan` skill must be complete
-(16 converters, 7 bridge passes, VulkanizePass, VulkanCompute runtime).
+(converter set, bridge passes, VulkanizePass, VulkanCompute runtime).
 
 **Ordering is critical.** Each C+ step builds infrastructure used by later steps:
 - C+1 invents the **placeholder pattern** and **builtin variable creation**
@@ -26,13 +27,13 @@ Do NOT attempt C+5 without completing C+1–C+4 first.
 
 ## 1. C+ Roadmap
 
-| Step | Feature | Files Changed | Traps Hit | Status |
+| Step | Feature | Files Changed | Key Traps | Status |
 |------|---------|--------------|-----------|--------|
-| C+1 | WorkgroupId for program_id | PrepareSPIRV.cpp, test | 1 | ✅ |
-| C+2 | Device-local memory | VulkanCompute.{h,cpp} | 1 | ✅ |
-| C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc, CMakeLists.txt | 8 | ✅ |
-| C+4 | Subgroup operations | PrepareSPIRV.cpp, VulkanCompute.{h,cpp}, triton_vulkan.cc | 2 | ✅ |
-| C+5 | Cooperative matrix | PrepareSPIRV.cpp, VulkanCompute.cpp, compiler.py, test | 5 | ✅ |
+| C+1 | WorkgroupId for program_id | PrepareSPIRV.cpp, test | C1-1 | ✅ |
+| C+2 | Device-local memory | VulkanCompute.{h,cpp} | C2-1 | ✅ |
+| C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc, CMakeLists.txt | C3-* | ✅ |
+| C+4 | Subgroup operations | PrepareSPIRV.cpp, VulkanCompute.{h,cpp}, triton_vulkan.cc | C4-* | ✅ |
+| C+5 | Cooperative matrix | PrepareSPIRV.cpp, VulkanCompute.cpp, compiler.py, test | C5-* | ✅ |
 
 ---
 
@@ -43,19 +44,23 @@ so all blocks execute in a single `vkCmdDispatch(num_blocks, 1, 1)`.
 
 ### How to Reproduce
 
-1. In `PrepareSPIRV.cpp` VulkanizePass, split scalar args: last 3 are
-   program_id → replaced with `__builtin_workgroup_id` GlobalVariable
+1. In `PrepareSPIRV.cpp` VulkanizePass, split scalar args: the `program_id`
+   args (last group in the program-info args) → replaced with
+   `__builtin_workgroup_id` GlobalVariable
    (`BuiltIn WorkgroupId`), read via `spirv.CompositeExtract`
-2. Remaining scalars (N, num_programs) → push constants (12 bytes less)
+2. Remaining scalars (N, num_programs) → push constants with a smaller payload
 3. Use `emitError() + signalPassFailure()`, NOT `assert()` (trap C1-1)
 4. Add test: `vadd_multiblock` — 1024 elements, 4 workgroups
 
 ### Arg Layout After C+1
 
+Program-info arg count is defined by `TRITON_PROGRAM_INFO_ARG_COUNT` in
+`TritonToLinalgPass.cpp`.
+
 ```
-func @kernel(%ptrs..., %N, %num_progs(3), %pid(3))
-                                         ^^^^^^^^ → WorkgroupId builtin
-Push constants: [N, num_progs_x, num_progs_y, num_progs_z]  (no pid)
+func @kernel(%ptrs..., %scalar args..., %program_info_args...)
+                                      ^^^^^^^^^^^^^^^^^^^^^ the last program-info group → WorkgroupId builtin
+Push constants: scalar args except the program_id group (no pid)
 ```
 
 ### Trap C1-1: assert → emitError
@@ -82,8 +87,8 @@ Always use `funcOp.emitError(...); return signalPassFailure();`.
 
 ### Trap C2-1: BAR Memory Masquerades as VRAM
 
-On discrete GPUs, a ~256MB memory type is BOTH `DEVICE_LOCAL` AND
-`HOST_VISIBLE` — the PCIe BAR, not true VRAM. `findMemoryTypeFallback`
+On discrete GPUs, a host-visible `DEVICE_LOCAL` memory type may actually be
+the PCIe BAR, not true VRAM. `findMemoryTypeFallback`
 must skip types with both flags. Many Vulkan tutorials get this wrong.
 
 ---
@@ -95,10 +100,11 @@ must skip types with both flags. Many Vulkan tutorials get this wrong.
 
 ### How to Reproduce
 
-**Step 1: Add local_id args.** In `TritonToLinalgPass.cpp`, change
-`PROGRAM_INFO_ARG_COUNT` from 6 to 9 (add 3 local_id args). Fix arg indices:
-- `GetProgramIDConverter`: `numArgs - 2*3 + axis` (was `numArgs - 3 + axis`)
-- `GetNumProgramsConverter`: `numArgs - 3*3 + axis` (was `numArgs - 2*3 + axis`)
+**Step 1: Add local_id args.** In `TritonToLinalgPass.cpp`, update
+`TRITON_PROGRAM_INFO_ARG_COUNT` to include the `local_id` group. Fix arg
+indices:
+- `GetProgramIDConverter`: index from the final program-info group
+- `GetNumProgramsConverter`: index from the preceding program-info group
 
 **Step 2: Create `ConvertReductionToParallel` pass** (PrepareSPIRV.cpp).
 Runs AFTER bufferize, BEFORE linalg-to-loops. For each `linalg.reduce`:
@@ -144,12 +150,12 @@ spirv.FunctionCall @__vulkan_barrier()
       3. Add builtins (WorkgroupId, LocalInvocationId)
 ```
 
-### The 8 Traps (in the order you will hit them)
+### Documented Traps for C+3 (in the order you will hit them)
 
 | # | What Goes Wrong | Why | Fix |
 |---|----------------|-----|-----|
 | C3-8 | MSVC: cascading `auto` failures | Missing `#include "Linalg/IR/Linalg.h"` in PrepareSPIRV.cpp | Include ALL used dialect headers first |
-| C3-6 | Existing converters read wrong args | Adding 3 args shifts indices | Fix GetProgramID (numArgs-6) and GetNumPrograms (numArgs-9) |
+| C3-6 | Existing converters read wrong args | Adding the `local_id` group shifts indices | Fix `GetProgramID` and `GetNumPrograms` index math using `TRITON_PROGRAM_INFO_ARG_COUNT` |
 | C3-1 | `gpu.barrier` silently ignored | `convert-gpu-to-spirv` doesn't work on `func.func` | Use `func.call @__vulkan_barrier` placeholder |
 | C3-2 | `spirv.ControlBarrier` blocks func conversion | `convert-func-to-spirv` rejects non-func-dialect ops | Defer barrier creation to VulkanizePass |
 | C3-3 | Shared alloca becomes Function class | `convert-memref-to-spirv` forces ALL Variables to Function | Detect by array size in VulkanizePass |
@@ -191,15 +197,16 @@ prepare_spirv → lower_scf_to_cf → canonicalize
 
 ## 5. C+4: Subgroup Operations
 
-**Goal:** Replace the innermost tree reduction strides (< subgroupSize=32)
-with a single `spirv.GroupNonUniform*` op. Eliminates 5 barriers for
-256-element reductions (8 → 3 barriers).
+**Goal:** Replace the innermost tree reduction strides below `SUBGROUP_SIZE`
+(search for `SUBGROUP_SIZE` in `PrepareSPIRV.cpp`) with a single
+`spirv.GroupNonUniform*` op. This reduces shared-memory barriers for
+large block reductions.
 
 ### How to Reproduce
 
 1. `VulkanCompute.{h,cpp}`: Add `subgroupSize_` field + `getSubgroupSize()`
    method. Query via `VkPhysicalDeviceSubgroupProperties` in `pickPhysicalDevice`.
-   **Must use `VK_API_VERSION_1_1`** — trap C4-1.
+   **Must use the API version that exposes `vkGetPhysicalDeviceProperties2`** — trap C4-1.
 2. `triton_vulkan.cc`: Expose `subgroup_size()` to Python via pybind11
 3. In `ConvertReductionToParallel`:
    a. Classify combiner op (arith.addf → fadd, arith.maximumf → fmax, etc.)
@@ -239,23 +246,24 @@ Total: 4 barriers (was 9 without subgroup ops)
 
 ### Trap C4-1: Vulkan API Version
 
-`vkGetPhysicalDeviceProperties2` (for subgroup size query) requires
-`VK_API_VERSION_1_1`. With 1.0, `subgroupSize` silently returns 0.
+`vkGetPhysicalDeviceProperties2` (for subgroup size query) requires the
+API version that exposes that query path. With older API settings,
+`subgroupSize` silently returns 0.
 
 ### Trap C4-2: Missing Barrier After Subgroup Reduce
 
 After the subgroup reduce, each subgroup stores its result to shared[tid].
-Subgroup 0 stores the correct answer in shared[0]. But threads in other
-subgroups (32+) may read shared[0] before subgroup 0's store completes.
-Without a barrier, **softmax fails with ~0.23 error** (race on shared[0]).
+Subgroup 0 stores the correct answer in shared[0]. But threads in later
+subgroups may read shared[0] before subgroup 0's store completes.
+Without a barrier, **softmax fails** (race on shared[0]).
 This bug is hard to catch because reduce_sum and reduce_max pass — only
 softmax (2 reductions sharing the same shared memory) exposes the race.
 
 ### Known Limitation
 
-Subgroup size is hardcoded to 32 (`constexpr SUBGROUP_SIZE = 32`). Correct
-for all NVIDIA GPUs. For AMD (64) or Intel (8/16/32), should be made
-configurable via module attribute.
+Subgroup size is defined by `SUBGROUP_SIZE` (search for it in
+`PrepareSPIRV.cpp`). For GPUs with non-default subgroup widths, it should
+be made configurable via module attribute.
 
 ---
 
@@ -293,7 +301,7 @@ VulkanizePass:
 | VulkanizePass | Maps `vulkan.coop_buffer_args` → GlobalVariables. AccessChain with `StorageBuffer` pointers. |
 | `createLogicalDevice` | Queries `vkEnumerateDeviceExtensionProperties`. Enables coop matrix only if supported. |
 | VCE triple | V_1_6 + CooperativeMatrixKHR + Float16 + StorageBuffer16BitAccess (conditional) |
-| Test | `matmul_coop_f16`: 16×16 f16 cooperative matmul, error ~0.015 |
+| Test | `matmul_coop_f16`: cooperative matrix validation (run the Vulkan test suite to verify) |
 
 ### How to Reproduce
 
@@ -334,7 +342,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 5. **Test**: `matmul_coop_f16` — 16×16 f16 matmul, tolerance 5e-2.
 
-### The 5 Traps of C+5
+### Documented Traps of C+5
 
 | # | Trap | Fix |
 |---|------|-----|
@@ -346,7 +354,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 ---
 
-## 7. Traps Reference (All 23)
+## 7. Traps Reference
 
 | ID | Category | One-liner |
 |----|----------|-----------|
@@ -360,7 +368,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 | C3-6 | Convention | Adding args shifts existing arg indices in converters |
 | C3-7 | Semantics | Softmax = 2 reductions = 2 shared variables to promote |
 | C3-8 | MSVC | Missing `#include` causes cascading `auto` deduction failures |
-| C4-1 | Vulkan | `vkGetPhysicalDeviceProperties2` needs Vulkan 1.1 API version |
+| C4-1 | Vulkan | `vkGetPhysicalDeviceProperties2` needs the API version that exposes subgroup properties |
 | C4-2 | Synchronization | Missing barrier after subgroup reduce → race on shared[0] |
 | C5-1 | SPIR-V Spec | Function-class pointers invalid for cooperative matrix ops |
 | C5-2 | MLIR Pipeline | FixAllocaStorageClass rewrites placeholder declarations |
@@ -370,7 +378,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 | G-1 | Correctness | Masked load/store must apply mask — never do full copy/store |
 | G-2 | SPIR-V Spec | Push-constant struct needs natural alignment per member type |
 | G-3 | SPIR-V Spec | Push constants are NOT interface variables in EntryPoint |
-| G-4 | Portability | Subgroup size varies by vendor (NVIDIA=32, AMD=64, Intel=8–32) |
+| G-4 | Portability | Subgroup size varies by vendor; do not assume the default fits every GPU |
 | G-5 | Correctness | Reduce identity must match combiner — zero is wrong for min/max |
 | G-6 | MLIR API | In ConversionPattern, use `adaptor.getXxx()` not `op.getXxx()` for operands |
 
@@ -397,7 +405,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
    survive through `convert-*-to-spirv`. Detect shared memory by matching
    array dimensions against known block size.
 
-6. **Test after EVERY change.** Run all 12 tests after every edit. The
+6. **Test after EVERY change.** Run `python third_party/vulkan/test/test_kernels_vulkan.py` after every edit. The
    pipeline is fragile — a change in arg layout breaks everything downstream.
 
 7. **Debug with `str_nodebug()` + regex.** Print IR at each pipeline step.
@@ -411,3 +419,16 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 9. **Buffer-forwarding bypasses pipeline limitations.** When MLIR passes
    force wrong storage classes, trace backward through the IR to find the
    original buffer args and reference their GlobalVariables directly.
+
+---
+
+## 9. Adapting to Upstream Changes
+
+This skill documents patterns and principles, not exact code locations.
+When upstream Triton or MLIR changes:
+
+1. **Search, don't assume line numbers.** Use `rg "__vulkan_|ConvertReductionToParallel|ConvertMatmulToCooperative|SUBGROUP_SIZE" third_party\vulkan\lib\Conversion` to find the current placeholder, reduction, cooperative-matrix, and subgroup code.
+2. **Verify arg layout.** Check `TRITON_PROGRAM_INFO_ARG_COUNT` in `third_party\vulkan\lib\Conversion\TritonToLinalgPass.cpp`; if it changed, update every `program_id`, `num_programs`, `local_id`, and push-constant index calculation.
+3. **Verify test suite.** Run `python third_party\vulkan\test\test_kernels_vulkan.py` — the test count may change, but all tests should pass.
+4. **Verify IR after each pass.** Print `str_nodebug()` after bufferize, bridge passes, and VulkanizePass; look for leftover `memref.*`, `gpu.*`, or `func.call @__vulkan_*` operations.
+5. **Verify capabilities and runtime probing.** Make sure the `spirv.module` VCE triple, subgroup assumptions, and cooperative-matrix extension enabling all match the ops actually emitted and the device features actually reported.

@@ -43,7 +43,7 @@ libraries, no Python dependency. No need to rebuild LLVM when switching envs.
 External dependencies live in `build/` (git-ignored):
 - `build/llvm-project/` — LLVM/MLIR source and build
 - `build/json/` — nlohmann/json headers
-- `build/cmake.win-amd64-cpython-*` — triton cmake build (created by pip)
+- `build/cmake.win-amd64-cpython-*` — triton cmake build (created by pip; exact directory name varies by Python version)
 
 Build scripts live in TWO locations (identical copies):
 - `.github/skills/triton-windows-build/scripts/` — canonical, tracked by git
@@ -187,7 +187,7 @@ Build triton-windows. Requires LLVM already built.
 4. Build: `pip install --no-build-isolation --verbose -e .`
 5. Build triton-opt (needed for debugging and lit tests):
    ```powershell
-   cd build/cmake.win-amd64-cpython-3.14
+   cd build\<your cmake build dir>
    ninja triton-opt
    ```
 6. Remove AMD backend symlink (it causes ImportError since AMD plugin wasn't built):
@@ -247,6 +247,9 @@ This is effectively a Debug build with Release CRT — the best of both worlds.
 ---
 
 ## Patch Reference
+
+These patches target the LLVM commit in `cmake/llvm-hash.txt`. If upstream
+changed, search for the code pattern described and adapt the fix.
 
 Apply these patches **semantically** — search for the code pattern and replace.
 Do NOT use git patches since upstream changes frequently.
@@ -521,3 +524,13 @@ Two changes in `env_nvidia_tool`:
 | 22 | driver.c POSIX-only | ERROR | dlfcn.h, posix_memalign, compound literals |
 | 23 | Temp file locking | ERROR | NamedTemporaryFile not closed before remove |
 | 24 | ptxas env key has .exe | ERROR | TRITON_PTXAS.EXE_PATH bug |
+
+## Adapting to New LLVM Versions
+
+When `cmake/llvm-hash.txt` changes, re-run
+`python .github/skills/triton-windows-build/scripts/inspect-build.py --fix`,
+match the reported IDs to the table above, and apply the corresponding patches
+semantically rather than by line number. If the surrounding code moved, search
+for the function, macro, or build rule described in each patch and adapt the
+edit to the new upstream shape while keeping the exact replacement snippets
+where shown.

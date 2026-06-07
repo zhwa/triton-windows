@@ -33,7 +33,7 @@ GPU result                              ← via vkCmdDispatch
 
 ### Verified Results
 
-12 kernel types, verified on RTX 2080 Ti via native Vulkan compute:
+Multiple kernel types, verified on RTX 2080 Ti via native Vulkan compute:
 
 | Kernel | What it tests | Error |
 |--------|--------------|-------|
@@ -61,7 +61,7 @@ GPU result                              ← via vkCmdDispatch
 | **OS** | Windows 10 or 11 |
 | **GPU** | Any with Vulkan 1.0+ (NVIDIA, AMD, Intel) |
 | **C++ compiler** | Visual Studio 2022+ with MSVC v14.44+ |
-| **Python** | 3.14 recommended (conda: `conda create -n mlir-dev python=3.14`) |
+| **Python** | 3.10+ (check conda for latest compatible version) |
 | **Vulkan SDK** | Headers + lib (conda: `conda install vulkan-headers vulkan-loader`) |
 
 ### Step 1: Build LLVM and Triton
@@ -83,7 +83,9 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Bui
 }
 
 # Build (Vulkan SDK auto-detected from conda or VULKAN_SDK env var)
-cd build/cmake.win-amd64-cpython-3.14
+$env:PYTHONPATH = ".\python"
+$buildDir = python -c "from build_helpers import get_cmake_dir; print(get_cmake_dir())"
+cd $buildDir
 cmake --build . --target triton
 ```
 
@@ -95,7 +97,7 @@ $env:TRITON_BACKENDS_IN_TREE = "1"
 python third_party/vulkan/test/test_kernels_vulkan.py
 ```
 
-Expected: `Result: 12/12 PASS`
+Expected: `All tests PASS`
 
 ---
 
@@ -256,15 +258,15 @@ third_party/vulkan/
 │   ├── Conversion/
 │   │   ├── TritonToLinalg.cpp   # 16 converters (~1700 lines)
 │   │   ├── TritonToLinalgPass.cpp
-│   │   └── PrepareSPIRV.cpp     # Bridge passes + VulkanizePass + C+ passes (~1600 lines)
+│   │   └── PrepareSPIRV.cpp     # Bridge passes + VulkanizePass + C+ passes (the largest backend file)
 │   └── Runtime/
-│       └── VulkanCompute.cpp    # Vulkan dispatch engine (~600 lines)
+│       └── VulkanCompute.cpp    # the Vulkan dispatch engine
 ├── triton_vulkan.cc             # pybind11 module
 ├── CMakeLists.txt
 └── test/
-    ├── test_kernels_vulkan.py   # 12 Vulkan GPU tests (primary)
-    ├── test_kernels.py          # 14 OpenCL tests (optional)
-    └── *.ttir                   # 13 test kernels
+    ├── test_kernels_vulkan.py   # Vulkan GPU test suite (primary)
+    ├── test_kernels.py          # OpenCL test suite (optional)
+    └── *.ttir                   # test kernels
 ```
 
 ## Skills (Developer Docs)
@@ -275,7 +277,7 @@ third_party/vulkan/
 |-------|---------|
 | `triton-windows-build` | LLVM + Triton build on Windows (MSVC patches, vcvars, build scripts) |
 | `triton-windows-vulkan` | Base backend: 16 converters, 7 bridge passes, VulkanizePass, runtime API |
-| `triton-windows-vulkan-perf` | C+1–C+5 performance roadmap, 23 documented traps, strategy lessons |
+| `triton-windows-vulkan-perf` | C+1–C+5 performance roadmap, documented traps, strategy lessons |
 | `triton-windows-dev` | Testing, debugging, profiling |
 | `triton-windows-opencl` | Optional OpenCL debug emitters |
 
@@ -295,7 +297,7 @@ third_party/vulkan/
 |---------|--------|-------------|
 | TTIR→Linalg converters | ✅ | 16 converters: splat, range, broadcast, reduce, matmul, load/store, atomics |
 | SPIR-V bridge passes | ✅ | 7 passes resolving MLIR→SPIR-V gaps (reinterpret_cast, copy, expand_shape, etc.) |
-| Native Vulkan dispatch | ✅ | VulkanizePass + VulkanCompute runtime, 12/12 kernels |
+| Native Vulkan dispatch | ✅ | VulkanizePass + VulkanCompute runtime, all current tests pass |
 | WorkgroupId parallel dispatch | ✅ | program_id via SPIR-V WorkgroupId builtin (C+1) |
 | Device-local memory | ✅ | Staging buffers + vkCmdCopyBuffer (C+2) |
 | Shared memory reductions | ✅ | Workgroup storage class + tree reduction + ControlBarrier (C+3) |

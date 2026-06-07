@@ -5,10 +5,13 @@
 > and the `triton-windows-vulkan` / `triton-windows-vulkan-perf` skills).
 > Use the OpenCL emitter when you need human-readable C output for debugging
 > converter correctness.
+>
+> **Durability note:** Line numbers and counts in this guide may drift with
+> code changes. Use function/class names to find current locations.
 
 **Scope:** The parallel OpenCL emitter that maps `linalg` ops directly
 to OpenCL workitems, achieving 253× speedup over the serial emitter for
-elementwise kernels.
+elementwise kernels, as measured on [test date].
 
 **Audience:** Compiler engineers who want to understand the parallel execution
 model, the tree reduction algorithm, barrier semantics, and how to extend the
@@ -64,7 +67,7 @@ For multi-block kernels (e.g., 65536 elements = 256 blocks), the host dispatches
 each block sequentially in a Python loop. This means 65536 elements are processed
 by 256 serial dispatches, each running 256 elements on one thread.
 
-The result: **48,683 µs** for `vector_add` at N=65536 — dominated by
+The result: **48,683 µs** (benchmark snapshot) for `vector_add` at N=65536 — dominated by
 256 sequential kernel launches with zero GPU parallelism.
 
 ---
@@ -176,7 +179,7 @@ Parallel pipeline:
 
 The first two stages are identical. The difference is in stages 3 and 4.
 
-### `make_memref_bufonly` (compiler.py, lines 129–142)
+### `make_memref_bufonly` (search for `make_memref_bufonly` in `compiler.py`)
 
 ```python
 @staticmethod
@@ -195,7 +198,7 @@ This runs exactly one pass (`one_shot_bufferize`) followed by cleanup.
 The three passes that destroy parallelism (`convert_linalg_to_loops`,
 `lower_affine`, `convert_scf_to_cf`) are deliberately omitted.
 
-### `make_opencl_parallel` (compiler.py, lines 144–155)
+### `make_opencl_parallel` (search for `make_opencl_parallel` in `compiler.py`)
 
 ```python
 @staticmethod
@@ -217,7 +220,7 @@ Two important details:
 
 ### Pipeline Registration
 
-The parallel stages are NOT in `add_stages()` (line 44–49 of compiler.py).
+The parallel stages are NOT in `add_stages()` (search for `add_stages()` in `compiler.py`).
 Only the serial+SPIR-V pipeline is registered with Triton's framework:
 
 ```python
@@ -237,7 +240,7 @@ the framework's stage dispatch mechanism.
 
 ## 4. The ParallelOpenCLEmitter Class
 
-**File:** `third_party/vulkan/backend/emitter_parallel.py` (~790 lines)
+**File:** `third_party/vulkan/backend/emitter_parallel.py` (the parallel emitter)
 
 ### Class Design
 
@@ -263,7 +266,7 @@ The emitter maintains an SSA map (`%name` → `varN`) and a type map
 This is the same architecture as the serial emitter but with parallel-aware
 op handlers.
 
-### Emission Flow (the `emit()` method, lines 84–146)
+### Emission Flow (search for `emit()` in `emitter_parallel.py`)
 
 ```
 1. Parse function signature → extract args (name, type, is_memref)
@@ -312,7 +315,7 @@ Prefixes encode the role: `ptr_` for pointers, `sh_` for shared arrays,
 `f_` for float results, `i_` for integer results, `c_` for constants,
 `ld_` for loads, `m_` for math function results, `loc_` for local scalars.
 
-### Body Dispatcher (`_emit_body`, lines 197–287)
+### Body Dispatcher (search for `_emit_body` in `emitter_parallel.py`)
 
 The body dispatcher walks MLIR lines and routes each to a handler:
 
@@ -366,7 +369,7 @@ pattern.
 
 ### 5.2. `memref.alloc` → `__local` Array or Private Scalar
 
-**Decision rule (lines 311–343):**
+**Decision rule (search for `_emit_alloc_skip` in `emitter_parallel.py`):**
 
 | MLIR Type | OpenCL Declaration | Scope |
 |-----------|-------------------|-------|
@@ -391,7 +394,7 @@ at function scope after the body walk (see §4).
 
 ### 5.3. `memref.copy` → Per-Workitem Element Copy
 
-**Generated OpenCL (lines 345–369):**
+**Generated OpenCL (search for `_emit_parallel_copy` in `emitter_parallel.py`):**
 ```c
 // Array → array copy
 sh_dst[_tid] = ptr_src[_tid];
@@ -443,7 +446,7 @@ float f_4 = v_1 * v_2;     // body: arith.mulf
 sh_c[_tid] = f_4;          // yield → write to outs[0][_tid]
 ```
 
-**How it works (lines 386–465):**
+**How it works (search for `_emit_linalg_generic` in `emitter_parallel.py`):**
 
 1. **Extract ins/outs operands**: Parse `ins(%a, %b : ...)` to get `[%a, %b]`.
    Parse `outs(%c : ...)` to get `[%c]`.
@@ -482,7 +485,7 @@ linalg.matmul ins(%a, %b : memref<16x16xf32>, memref<16x16xf32>)
               outs(%c : memref<16x16xf32>)
 ```
 
-**Generated OpenCL (lines 620–659):**
+**Generated OpenCL (search for `_emit_linalg_matmul` in `emitter_parallel.py`):**
 ```c
 // Parallel matmul 16x16 @ 16x16
 int _row = _tid / 16;      // M*N workitems, row = tid / N
@@ -517,7 +520,7 @@ barrier(CLK_LOCAL_MEM_FENCE);
 
 ### 5.7. `linalg.transpose` → One Workitem Per Element (Index Swap)
 
-**Generated OpenCL (lines 661–685):**
+**Generated OpenCL (search for `_emit_linalg_transpose` in `emitter_parallel.py`):**
 ```c
 // Parallel transpose 16x16
 int _row = _tid / 16;
@@ -544,7 +547,7 @@ float ld_2 = ptr_buf[ic_3];
 float ld_3 = ptr_buf[v_i + v_j]; // multi-idx linearized
 ```
 
-The handler (lines 698–724) splits indices on commas. Single-index loads
+The handler (search for `_emit_memref_load` in `emitter_parallel.py`) splits indices on commas. Single-index loads
 produce `buf[idx]`. Multi-index loads (which shouldn't appear after
 bufferization since all arrays are flattened) generate a sum of the indices
 as a conservative linearization.
@@ -567,7 +570,7 @@ float c_4 = INFINITY;    // from 0x7F800000
 float c_5 = NAN;          // from 0x7FC00000
 ```
 
-The hex float decoder (lines 751–770) unpacks 32-bit hex values via
+The hex float decoder (search for `_emit_constant` in `emitter_parallel.py`) unpacks 32-bit hex values via
 `struct.unpack('f', struct.pack('I', bits))` and detects special values
 (infinity, NaN). Normal hex floats are emitted as `%.8ef` formatted strings.
 
@@ -654,7 +657,7 @@ race-condition bugs.
 `linalg.reduce` takes a 256-element array and produces a scalar.
 With 256 workitems, how do you compute a single value from 256 inputs?
 
-### The Algorithm (lines 541–618)
+### The Algorithm (search for `_emit_linalg_reduce` in `emitter_parallel.py`)
 
 **Step 1: Load into `__local`**
 ```c
@@ -693,8 +696,8 @@ For example, softmax's `exp(x - max) / sum(exp(x - max))` needs both
 
 ### Power-of-2 Requirement
 
-The tree reduction assumes `block_size` is a power of 2. The assertion
-at line 600–601 enforces this:
+The tree reduction assumes `block_size` is a power of 2. The assertion in
+`_emit_linalg_reduce` enforces this:
 
 ```python
 assert self.block_size > 0 and (self.block_size & (self.block_size - 1)) == 0, \
@@ -745,7 +748,7 @@ The serial emitter hardcodes `float` for all arithmetic operations. The
 parallel emitter must support `half` (`f16`), `double` (`f64`), and
 integer types. MLIR ops carry type annotations that must be extracted.
 
-### Body Op Type Detection (lines 468–473)
+### Body Op Type Detection (search for `_emit_body_op` in `emitter_parallel.py`)
 
 Inside `linalg.generic` bodies, each op has a trailing type annotation:
 
@@ -813,7 +816,7 @@ The alternation pattern `x(\w+)>|memref<(\w+)>` is critical for handling
 
 ## 10. Test Suite and Verification
 
-### Test File: `test_kernels_parallel.py` (~198 lines)
+### Test File: `test_kernels_parallel.py`
 
 The parallel test suite uses the same TTIR input files as the serial test
 suite but compiles through the parallel pipeline:
@@ -847,7 +850,7 @@ Key: `global_size = local_size = block_size`. This creates one workgroup
 with exactly `block_size` workitems. Each workitem gets a unique `_tid`
 from `get_local_id(0)`.
 
-### 10 Test Kernels
+### Parallel Test Kernels
 
 | # | Kernel | Pattern | Tolerance | Key Validation |
 |---|--------|---------|-----------|----------------|
@@ -905,7 +908,7 @@ python third_party/vulkan/test/test_kernels.py
 
 ## 11. Performance Analysis
 
-### Benchmark Tool: `bench_kernels.py` (~275 lines)
+### Benchmark Tool: `bench_kernels.py`
 
 The benchmark compares three execution modes:
 
@@ -919,15 +922,15 @@ The benchmark compares three execution modes:
 
 | Mode | Time | Speedup |
 |------|------|---------|
-| Serial (256 blocks × 1 workitem) | 48,683 µs | 1× |
-| Parallel (1 dispatch × 256 workitems) | 192 µs | **253×** |
+| Serial (256 blocks × 1 workitem) | 48,683 µs (benchmark snapshot) | 1× |
+| Parallel (1 dispatch × 256 workitems) | 192 µs | **253×** (as measured on [test date]) |
 | CUDA (PyTorch) | 19 µs | 2,539× vs serial |
 
 ### Why 253× Speedup
 
 The serial mode dispatches 256 separate kernel invocations from Python,
 each processing 256 elements with one workitem. The dominant cost is
-**kernel launch overhead** (~190 µs × 256 launches ≈ 48,683 µs).
+**kernel launch overhead** (~190 µs × 256 launches ≈ 48,683 µs in this benchmark snapshot).
 
 The parallel mode dispatches ONE kernel with 256 workitems processing
 elements in parallel. The single launch overhead (~190 µs) is the
@@ -1125,7 +1128,7 @@ have a body? Is the opening brace on the same line or the next?
 
 ### Step 2: Add to the Body Dispatcher
 
-In `_emit_body` (line 197), add a new `elif` branch:
+In `_emit_body` (search for `_emit_body` in `emitter_parallel.py`), add a new `elif` branch:
 
 ```python
 elif 'linalg.newop' in line:

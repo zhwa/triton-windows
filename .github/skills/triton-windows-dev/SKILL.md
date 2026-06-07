@@ -55,7 +55,9 @@ triton-opt.exe input.ttgir -tritongpu-coalesce
 triton-opt.exe input.ttgir -convert-triton-gpu-to-llvm="compute-capability=80"
 ```
 
-Build `triton-opt` specifically: from `build/cmake.win-amd64-cpython-3.14/`, run `ninja triton-opt`.
+Build `triton-opt` specifically: from the CMake build directory under `build\`
+(the folder name varies by Python version; look for `cmake.win-amd64-cpython-*`),
+run `ninja triton-opt`.
 
 ## VS Code Integration
 
@@ -103,7 +105,7 @@ Available TTIR files and their primary compiler paths:
 
 Regenerate TTIR after kernel changes:
 ```powershell
-$env:TRITON_PTXAS_PATH = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2/bin/ptxas.exe"
+$env:TRITON_PTXAS_PATH = "C:\path\to\your\CUDA toolkit\bin\ptxas.exe"
 conda run -n triton-dev python .github/skills/triton-windows-dev/samples/generate_debug_ir.py
 ```
 Or use VS Code task: **Terminal > Run Task > triton: generate debug IR**
@@ -148,7 +150,8 @@ Steps:
    - `python.defaultInterpreterPath`: build Python from `triton-dev` conda env
    - `python.testing.pytestEnabled`: true
    - `python.testing.pytestArgs`: `[".github/skills/triton-windows-dev/samples", "-s", "--tb=short"]`
-   - `C_Cpp.default.compileCommands`: `${workspaceFolder}/build/cmake.win-amd64-cpython-3.14/compile_commands.json`
+   - `C_Cpp.default.compileCommands`: `${workspaceFolder}/build/<active cmake build dir>/compile_commands.json`
+     (the build dir name varies by Python version)
 
 3. **Create/verify `.vscode/launch.json`** with these configurations:
 
@@ -182,8 +185,9 @@ Steps:
 
 ### Task: `test-kernel [pattern]`
 
-Run the kernel test suite. Tests cover 6 complexity levels with proper pytest
-fixtures, parametrization, dtype sweeps, and tolerance handling.
+Run the kernel test suite. The current sample suite covers a graduated set of
+kernel patterns with proper pytest fixtures, parametrization, dtype sweeps, and
+tolerance handling.
 
 ```powershell
 # Run all kernel tests
@@ -205,24 +209,24 @@ pytest python/test/unit/language/test_core.py -s --tb=short --device cuda
 pytest python/test/unit/language/test_core.py::test_bin_op -s --tb=short
 ```
 
-**Test suite levels** (in `samples/test_kernels.py`):
+**Representative kernels in the current sample suite** (in `samples/test_kernels.py`):
 
-| Level | Kernel | Pattern | Compiler Paths Exercised |
-|---|---|---|---|
-| 1 | `vector_add` | Elementwise | ElementwiseOp, MemoryOp, SPMDOp, MakeRangeOp |
-| 2 | `fma` | Fused multiply-add | + ArithTypeConversion (dtype cast) |
-| 3 | `reduce_sum` | Block reduction | + ReduceOpToLLVM, atomic_add |
-| 4 | `softmax` | Row-wise softmax | + max/exp/sum reductions, next_power_of_2 |
-| 5 | `rmsnorm` | Normalize + scale | + broadcast, rsqrt pattern |
-| 6 | `matmul` | Tiled GEMM | + DotOp, AccelerateMatmul, loop→scf.for |
-| 7 | `relu_dropout` | Control flow | + CombineTensorSelectAndIf, tl.where, constexpr branch, tl.rand |
-| 8 | `transpose` | 2D layout | + ViewOp, RemoveLayoutConversions, multi-dim grid |
-| 9 | `gelu` | Libdevice math | + `tl.math.exp`, extern elementwise, manual tanh via exp |
-| 10 | `cumsum` | Prefix scan | + ScanOpToLLVM (distinct from reduce) |
-| 11 | `reduce_max` | Atomic max | + atomic_max codegen path |
-| 12 | `autotuned_add` | Autotune | + @triton.autotune runtime, Config, key |
-| 13 | `broadcast_add` | Broadcast | + ReorderBroadcast, expand_dims, 2D ops |
-| 14 | `pipelined_matmul` | Pipelining | + pipeline, schedule-loops, tl.range(num_stages) |
+| Kernel | Pattern | Compiler Paths Exercised |
+|---|---|---|
+| `vector_add` | Elementwise | ElementwiseOp, MemoryOp, SPMDOp, MakeRangeOp |
+| `fma` | Fused multiply-add | + ArithTypeConversion (dtype cast) |
+| `reduce_sum` | Block reduction | + ReduceOpToLLVM, atomic_add |
+| `softmax` | Row-wise softmax | + max/exp/sum reductions, next_power_of_2 |
+| `rmsnorm` | Normalize + scale | + broadcast, rsqrt pattern |
+| `matmul` | Tiled GEMM | + DotOp, AccelerateMatmul, loop→scf.for |
+| `relu_dropout` | Control flow | + CombineTensorSelectAndIf, tl.where, constexpr branch, tl.rand |
+| `transpose` | 2D layout | + ViewOp, RemoveLayoutConversions, multi-dim grid |
+| `gelu` | Libdevice math | + `tl.math.exp`, extern elementwise, manual tanh via exp |
+| `cumsum` | Prefix scan | + ScanOpToLLVM (distinct from reduce) |
+| `reduce_max` | Atomic max | + atomic_max codegen path |
+| `autotuned_add` | Autotune | + @triton.autotune runtime, Config, key |
+| `broadcast_add` | Broadcast | + ReorderBroadcast, expand_dims, 2D ops |
+| `pipelined_matmul` | Pipelining | + pipeline, schedule-loops, tl.range(num_stages) |
 
 Plus benchmarks (vector_add GB/s, matmul TFLOPS) and an IR dump smoke test.
 
@@ -372,7 +376,7 @@ python my_kernel.py   # look for "lmem" warnings in output
 Set up VS Code debugging for `triton-opt.exe`:
 
 1. Ensure `triton-opt.exe` exists at `python/triton/_C/triton-opt.exe`
-   (if not: activate vcvars, cd to cmake build dir, run `ninja triton-opt`)
+   (if not: activate vcvars, cd to the CMake build dir under `build\`, then run `ninja triton-opt`)
 2. Use these launch configs (already in `.vscode/launch.json`):
    - **triton-opt: parse vecadd** — basic parse/verify
    - **triton-opt: combine pass** — watch rewrite patterns
@@ -380,18 +384,18 @@ Set up VS Code debugging for `triton-opt.exe`:
    - **triton-opt: current file** — debug whatever .mlir file is open
    - **Attach to Python** — debug JIT compilation from Python
 
-3. Key breakpoint locations:
+3. Key breakpoint locations (set a breakpoint at the entry of the named function):
 
 | Stage | File | Function | What to watch |
 |---|---|---|---|
-| Entry | `bin/triton-opt.cpp:5` | `main()` | `argc`, `argv` |
-| Registration | `bin/RegisterTritonDialects.h:~70` | `registerTritonDialects()` | All passes loaded |
-| Combine | `lib/Dialect/Triton/Transforms/Combine.cpp:~283` | `runOnOperation()` | `getOperation()` |
-| Combine pattern | same file ~78 | `matchAndRewrite()` | `op->getName()`, rewrite actions |
-| TTIR→TTGIR | `lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp:~728` | `runOnOperation()` | `numWarps`, `threadsPerWarp` |
-| Generic convert | same file ~38 | `GenericOpPattern::matchAndRewrite()` | op types gaining `#triton_gpu.blocked` |
-| Coalesce | `lib/Dialect/TritonGPU/Transforms/Coalesce.cpp:~77` | `runOnOperation()` | Layout changes |
-| TTGIR→LLVM | `third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/TritonGPUToLLVM.cpp:~97` | `runOnOperation()` | LLVM IR generation |
+| Entry | `bin/triton-opt.cpp` | `main()` | `argc`, `argv` |
+| Registration | `bin/RegisterTritonDialects.h` | `registerTritonDialects()` | All passes loaded |
+| Combine | `lib/Dialect/Triton/Transforms/Combine.cpp` | `runOnOperation()` | `getOperation()` |
+| Combine pattern | `lib/Dialect/Triton/Transforms/Combine.cpp` | the relevant `matchAndRewrite()` implementation | `op->getName()`, rewrite actions |
+| TTIR→TTGIR | `lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp` | `runOnOperation()` | `numWarps`, `threadsPerWarp` |
+| Generic convert | `lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp` | `GenericOpPattern::matchAndRewrite()` | op types gaining `#triton_gpu.blocked` |
+| Coalesce | `lib/Dialect/TritonGPU/Transforms/Coalesce.cpp` | `runOnOperation()` | Layout changes |
+| TTGIR→LLVM | `third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/TritonGPUToLLVM.cpp` | `runOnOperation()` | LLVM IR generation |
 
 4. **Debugger watch expressions:**
    - `op->getName().getStringRef()` — operation name (`tt.load`, `arith.addf`)
@@ -505,8 +509,8 @@ triton.knobs.runtime.add_stages_inspection_hook = my_hook
 Run MLIR lit tests (no GPU required):
 
 ```powershell
-# From the cmake build dir:
-cd build\cmake.win-amd64-cpython-3.14
+# From the CMake build dir under `build\` (the folder name varies by Python version):
+cd build\<your cmake build dir>
 
 # Build triton-opt first
 ninja triton-opt
@@ -553,6 +557,14 @@ Read `python/triton/backends/nvidia/compiler.py` and trace through:
 Print available tasks and the pipeline overview.
 
 ---
+
+## Adapting to Upstream Changes
+
+When upstream refactors passes or stage wiring, use `triton-opt` plus dumped IR
+to re-establish the current flow instead of relying on remembered line numbers.
+Start from a minimal `.ttir` or `.ttgir` file, run one pass or stage at a time,
+inspect `python/triton/backends/nvidia/compiler.py` for the active stage wiring,
+and search for the current function or pass name before setting breakpoints.
 
 ## Interpreter Mode (No GPU)
 
@@ -620,7 +632,7 @@ $env:TRITON_DEBUG = "1"                   # env var
 - `.github/skills/triton-windows-dev/debug-vecadd.ttir` — minimal TTIR for triton-opt debugging
 - `test/Triton/vecadd.mlir` — vector add with loop
 - `test/Triton/combine.mlir` — combine pass test cases
-- `references/gpu-tutorial/src/` — 19 chapters of kernel examples (see catalog above)
+- `references/gpu-tutorial/src/` — a multi-chapter set of kernel examples (see catalog above)
 
 ### Upstream Test Infrastructure
 - `python/test/conftest.py` — pytest fixtures (`device`, `fresh_triton_cache`)

@@ -9,7 +9,8 @@ user-invocable: true
 
 **This is an optional debugging tool.** The production Vulkan backend uses
 SPIR-V binary dispatch (see `triton-windows-vulkan`). The OpenCL emitters
-provide human-readable C output for debugging TritonToLinalg converters.
+provide human-readable C output for debugging TritonToLinalg converters, and
+should be treated as a debugging aid rather than the primary execution path.
 
 ## When to Use This
 
@@ -20,14 +21,14 @@ provide human-readable C output for debugging TritonToLinalg converters.
 
 ## Two Emitters
 
-### Serial Emitter (`emitter.py`, ~590 lines)
+### Serial Emitter (`emitter.py`)
 
 Pipeline: `make_ttir → make_linalg → make_memref → make_opencl`
 
 Walks fully-lowered MemRef/CF IR line-by-line. Each MLIR op → one C statement.
 Single-threaded: one workitem does all computation in serial loops.
 
-### Parallel Emitter (`emitter_parallel.py`, ~790 lines)
+### Parallel Emitter (`emitter_parallel.py`)
 
 Pipeline: `make_ttir → make_linalg → make_memref_bufonly → make_opencl_parallel`
 
@@ -47,8 +48,8 @@ for matmul output; `__local` declarations at function scope only.
 
 ## Test Suites
 
-- `test_kernels.py` — 14 tests via serial emitter + pyopencl
-- `test_kernels_parallel.py` — 10 tests via parallel emitter + pyopencl
+- `test_kernels.py` — the current serial-emitter test suite via pyopencl
+- `test_kernels_parallel.py` — the current parallel-emitter test suite via pyopencl
 - `bench_kernels.py` — Serial vs parallel vs CUDA benchmarks
 
 ## Architecture Note
@@ -72,3 +73,11 @@ The Vulkan/SPIR-V path uses `make_memref → make_spirv` (see `triton-windows-vu
 
 Zero code crosses between them. The OpenCL emitters never touch
 PrepareSPIRV.cpp; the Vulkan path never imports emitter.py.
+
+## Adapting to Upstream Changes
+
+If upstream Triton or the Vulkan bridge changes, keep the shared pipeline model
+(`make_ttir → make_linalg → ...`) but locate the current implementation by
+searching for the stage or converter name rather than relying on file size or
+test counts. Use the current test suite plus a known kernel to compare the
+serial and parallel emitters against the Vulkan path semantically.

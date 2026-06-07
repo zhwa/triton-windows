@@ -8,6 +8,12 @@
 
 This document is self-contained and reflects the current unified backend organization.
 
+> **Note on durability:** This guide describes architectural patterns and design
+> rationale that remain valid across upstream changes. Specific line numbers,
+> file sizes, and API names may drift — use `grep` to find current locations.
+> When in doubt, print IR with `str_nodebug()` after each pipeline stage to
+> verify the transformation.
+
 ---
 
 ## Table of Contents
@@ -131,9 +137,9 @@ third_party/vulkan/
 ├── include/Conversion/
 │  └── TritonToLinalg.h   # Public API: pass factory functions
 ├── lib/Conversion/
-│  ├── TritonToLinalg.cpp  # 16 conversion patterns (1125 lines)
-│  ├── TritonToLinalgPass.cpp # Pass wrapper + type converter (210 lines)
-│  └── PrepareSPIRV.cpp   # SPIR-V bridge + Vulkanization passes (~1601 lines)
+│  ├── TritonToLinalg.cpp  # Main converter file: TritonToLinalg + memory ops
+│  ├── TritonToLinalgPass.cpp # Pass wrapper + type converter
+│  └── PrepareSPIRV.cpp   # Largest backend file: SPIR-V bridge + Vulkanization passes
 ├── test/
 │  ├── lit.cfg.py      # Lit test configuration
 │  ├── test_triton_to_linalg.mlir
@@ -369,10 +375,13 @@ AFTER: func.func @kernel(%arg0: memref<*xf32>,
     }
 ```
 
-Nine i32 arguments are appended (`TRITON_PROGRAM_INFO_ARG_COUNT = 9`):
+Program-info i32 arguments are appended (see
+`TRITON_PROGRAM_INFO_ARG_COUNT` in `TritonToLinalgPass.cpp`):
 `num_programs(x,y,z)`, `program_id(x,y,z)`, and `local_id(x,y,z)`.
-`GetProgramIDConverter` extracts `numArgs-6..numArgs-4`; the last three args
-are `local_id`, and `GetNumProgramsConverter` extracts `numArgs-9..numArgs-7`.
+`GetProgramIDConverter` extracts the `program_id` arg group using the offset
+derived from `TRITON_PROGRAM_INFO_ARG_COUNT`; the trailing group is
+`local_id`, and `GetNumProgramsConverter` extracts the leading
+`num_programs` group.
 
 ### 4.2 Core Conversion Patterns
 
@@ -506,7 +515,8 @@ The pass wrapper in `TritonToLinalgPass.cpp` ties everything together:
 void runOnOperation() override {
   // 1. Set up type converter, conversion target, patterns
   // 2. Mark standard dialects as legal, Triton ops as illegal
-  // 3. Add program info args (9 × i32) to each tt.func
+  // 3. Add the program-info arg block (see TRITON_PROGRAM_INFO_ARG_COUNT)
+  //    to each tt.func
   // 4. Apply partial conversion
   // 5. Convert tt.func/tt.return → func.func/func.return
   // 6. Canonicalize
@@ -731,7 +741,9 @@ tt.func @vector_add(%x_ptr: !tt.ptr<f32>, %y_ptr: !tt.ptr<f32>,
 **After make_linalg (TritonToLinalg pass):**
 
 The kernel becomes a `func.func` with:
-- 3 `memref<*xf32>` args (type-converted pointers) + 1 `i32` (N) + 9 `i32` (program info: num_programs×3, program_id×3, local_id×3)
+- 3 `memref<*xf32>` args (type-converted pointers) + 1 `i32` (N) +
+  the program-info arg block (see `TRITON_PROGRAM_INFO_ARG_COUNT`:
+  `num_programs×3`, `program_id×3`, `local_id×3`)
 - `memref.reinterpret_cast` for each pointer+offset pattern
 - `memref.alloc + linalg.fill + memref.copy` for each load
 - `arith.addf` on tensors (will become `linalg.generic` via elementwise promotion)
@@ -768,19 +780,24 @@ Specifically:
 ### 6.1 What Changed (File Summary)
 
 ```
-Modified (3 files, +356 lines):
- third_party/vulkan/lib/Conversion/TritonToLinalg.cpp  +183 lines
- third_party/vulkan/lib/Conversion/TritonToLinalgPass.cpp +48 lines
- third_party/vulkan/backend/emitter.py          +125 lines (net)
+Modified core implementation files:
+ third_party/vulkan/lib/Conversion/TritonToLinalg.cpp
+   - AtomicRMWConverter, reduction scalar fix, scalar load/store fixes
+ third_party/vulkan/lib/Conversion/TritonToLinalgPass.cpp
+   - TypeConverter materializations and conversion target updates
+ third_party/vulkan/backend/emitter.py
+   - Hex float, N-D indexing, 0-d memref, alloca, and reshape-alias support
 
 Test assets:
- third_party/vulkan/test/test_*.ttir             (12 TTIR kernel files)
- third_party/vulkan/test/test_kernels.py         (serial OpenCL suite, 14 tests)
- third_party/vulkan/test/test_kernels_vulkan.py  (Vulkan SPIR-V suite, 12 tests)
+ third_party/vulkan/test/test_*.ttir             (the TTIR test kernels)
+ third_party/vulkan/test/test_kernels.py         (the OpenCL test suite)
+ third_party/vulkan/test/test_kernels_vulkan.py  (the Vulkan kernel test suite)
 
 Cleanup:
- third_party/vulkan/lib/Conversion/PrepareSPIRV.cpp   -254 lines
- third_party/vulkan/backend/compiler.py          +21/-18 lines
+ third_party/vulkan/lib/Conversion/PrepareSPIRV.cpp
+   - standalone finalization logic removed
+ third_party/vulkan/backend/compiler.py
+   - `make_spv()` extraction and binary extension cleanup
 ```
 
 ---
@@ -821,8 +838,8 @@ Case 3: Offset pointer tensor (different locations)
 
 ### 7.3 The Conversion Pattern
 
-**Location:** `third_party/vulkan/lib/Conversion/TritonToLinalg.cpp`, lines
-1126–1246.
+**Location:** search for `struct AtomicRMWConverter` in
+`third_party/vulkan/lib/Conversion/TritonToLinalg.cpp`.
 
 ```cpp
 struct AtomicRMWConverter
@@ -978,7 +995,8 @@ scalar. The mismatch caused type verification failures.
 
 ### 8.2 The Fix (Two Parts)
 
-**Part 1: 0-d tensor initialization** (lines 498–506)
+**Part 1: 0-d tensor initialization** (search for
+`if (resultShape.empty())` in `ReduceConverter`)
 
 Previously, scalar reduction tried to pass a bare scalar as the init value
 to `linalg.reduce`. But `linalg.reduce` requires tensor operands. Fix:
@@ -1000,7 +1018,8 @@ if (resultShape.empty()) {
 a `tensor<f32>` and `linalg.fill` fills it with the init value (0.0 for sum,
 -inf for max).
 
-**Part 2: 0-d tensor extraction** (lines 542–557)
+**Part 2: 0-d tensor extraction** (search for `tensor::ExtractOp` in
+`ReduceConverter`)
 
 After `linalg.reduce` produces a `tensor<f32>` (0-d), we need to extract the
 bare `f32` to match `tt.reduce`'s result type:
@@ -1051,7 +1070,7 @@ Both `LoadConverter` and `StoreConverter` now handle unranked memrefs
 by inserting a `memref.cast` to `memref<1xelemType>`:
 
 ```cpp
-// In LoadConverter (line 993) and StoreConverter (line 1093):
+// In the unranked-memref handling paths of LoadConverter and StoreConverter:
 if (isa<UnrankedMemRefType>(ptr.getType())) {
  auto elemType = cast<UnrankedMemRefType>(ptr.getType()).getElementType();
  auto ranked1D = MemRefType::get({1}, elemType);
@@ -1090,8 +1109,8 @@ if not cleaned up.
 
 ### 10.2 The Implementation
 
-**Location:** `third_party/vulkan/lib/Conversion/TritonToLinalgPass.cpp`,
-lines 45–76.
+**Location:** search for `addTargetMaterialization` in
+`third_party/vulkan/lib/Conversion/TritonToLinalgPass.cpp`.
 
 ```cpp
 // Target materialization: convert source type → target type
@@ -1293,8 +1312,9 @@ types and handles them specially (see §4.2.1).
 
 #### Trap #10: MLIR API Variations
 
-The LLVM commit used by Triton 3.7.0 has specific API signatures that
-differ from MLIR documentation. Key differences:
+The LLVM commit used by the current Triton version (check
+`python/triton/__init__.py`) has specific API signatures that differ from
+MLIR documentation. Key differences:
 
 | API | Correct for This Commit |
 |-----|-------------------------|
@@ -1409,7 +1429,7 @@ Serialized: ~1772 bytes of SPIR-V binary.
 
 ### 12.1 FinalizeSPIRV Removal
 
-Earlier revisions included a `FinalizeSPIRVPass` (~250 lines)
+Earlier revisions included a standalone `FinalizeSPIRVPass`
 that attempted to build `spirv.module` + `spirv.func` in C++, transplanting
 function bodies and fixing up types. This approach had fundamental issues:
 
@@ -1796,8 +1816,8 @@ The test suite takes a **compilation-first** approach:
 
 This tests the **entire backend** end-to-end, not just individual passes.
 If any pass produces incorrect IR, the GPU result will diverge from numpy.
-Today that coverage is split across `test_kernels.py` (14 serial OpenCL tests)
-and `test_kernels_vulkan.py` (12 Vulkan SPIR-V dispatch tests).
+Today that coverage is split across `test_kernels.py` (the serial OpenCL
+suite) and `test_kernels_vulkan.py` (the Vulkan SPIR-V dispatch suite).
 
 ### 16.2 Pipeline Under Test
 
@@ -1842,16 +1862,18 @@ def test_foo():
   # Upload to GPU
   xb = cl.Buffer(ctx, RO, hostbuf=x)
   ob = cl.Buffer(ctx, WO, N * 4)
-  # Run kernel (with program info args)
-  args = [xb, ob, np.int32(N)] + [np.int32(0)] * 9
+  # Run kernel (append the program-info arg block)
+  program_info = [np.int32(0)] * PROGRAM_INFO_ARG_COUNT
+  args = [xb, ob, np.int32(N)] + program_info
   run_kernel(src, md, args)
   # Read result and compare
   o = read_buf(ob, N)
   return np.max(np.abs(o - expected)) # max absolute error
 ```
 
-**The 9 extra `np.int32(0)` args:** These are the program info arguments
-that the Vulkan backend adds to every kernel:
+**The appended program-info args** (see `TRITON_PROGRAM_INFO_ARG_COUNT` in
+`TritonToLinalgPass.cpp`): these are the program info arguments that the Vulkan
+backend adds to every kernel:
 - `num_programs_x`, `num_programs_y`, `num_programs_z` — grid dimensions
 - `program_id_x`, `program_id_y`, `program_id_z` — current program index
 - `local_id_x`, `local_id_y`, `local_id_z` — thread index within the workgroup
@@ -2101,7 +2123,7 @@ This was the most complex step (8 traps documented). Key challenges:
 - `gpu.barrier` is silently ignored by `convert-gpu-to-spirv` (trap C3-1)
 - `convert-memref-to-spirv` forces ALL Variables to Function class (trap C3-3)
 - Shared Variables must be at module scope per SPIR-V spec (trap C3-4)
-- Adding 3 local_id args shifted all existing arg indices (trap C3-6)
+- Adding the `local_id` arg group shifted all existing arg indices (trap C3-6)
 
 **Arg layout after C+3:** `[...original..., num_programs×3, pid×3, local_id×3]`
 
@@ -2337,18 +2359,18 @@ in the build skill. The Vulkan backend adds:
 
 ### 21.1 Source Files
 
-| File | Lines | Coverage Area | Description |
-|------|-------|-------|-------------|
-| `lib/Conversion/TritonToLinalg.cpp` | 1002 | TritonToLinalg + memory ops | 16 conversion patterns + PtrState analysis |
-| `lib/Conversion/TritonToLinalgPass.cpp` | 176 | TritonToLinalg conversion | Pass wrapper, type converter, target setup |
-| `lib/Conversion/PrepareSPIRV.cpp` | 1601 | SPIR-V conversion | PrepareSPIRV, ConvertReductionToParallel, ConvertMatmulToCooperative, FixAllocaStorageClass, and Vulkanize passes |
-| `triton_vulkan.cc` | 141 | Backend skeleton + SPIR-V conversion | pybind11 bindings for all passes + serialization |
-| `include/Conversion/TritonToLinalg.h` | 32 | TritonToLinalg conversion | Public pass factory declarations |
-| `backend/compiler.py` | 273 | Pipeline orchestration across the backend | VulkanBackend with 6 pipeline stages |
-| `backend/driver.py` | 44 | Backend skeleton | VulkanDriver skeleton |
-| `backend/emitter.py` | 490 | Pointer analysis and memory ops | OpenCL C emitter (debugging path) |
-| `backend/__init__.py` | — | Backend skeleton | Backend discovery exports |
-| `CMakeLists.txt` | 68 | Pipeline orchestration across the backend | Build rules for static lib + pybind11 module |
+| File | Relative Size | Coverage Area | Description |
+|------|---------------|-------|-------------|
+| `lib/Conversion/TritonToLinalg.cpp` | Main converter file | TritonToLinalg + memory ops | 16 conversion patterns + PtrState analysis |
+| `lib/Conversion/TritonToLinalgPass.cpp` | Pass wrapper | TritonToLinalg conversion | Pass wrapper, type converter, target setup |
+| `lib/Conversion/PrepareSPIRV.cpp` | Largest backend file | SPIR-V conversion | PrepareSPIRV, ConvertReductionToParallel, ConvertMatmulToCooperative, FixAllocaStorageClass, and Vulkanize passes |
+| `triton_vulkan.cc` | Small binding layer | Backend skeleton + SPIR-V conversion | pybind11 bindings for all passes + serialization |
+| `include/Conversion/TritonToLinalg.h` | Small public header | TritonToLinalg conversion | Public pass factory declarations |
+| `backend/compiler.py` | Pipeline orchestrator | Pipeline orchestration across the backend | VulkanBackend with 6 pipeline stages |
+| `backend/driver.py` | Small driver skeleton | Backend skeleton | VulkanDriver skeleton |
+| `backend/emitter.py` | Medium debugging emitter | Pointer analysis and memory ops | OpenCL C emitter (debugging path) |
+| `backend/__init__.py` | Tiny export surface | Backend skeleton | Backend discovery exports |
+| `CMakeLists.txt` | Small build file | Pipeline orchestration across the backend | Build rules for static lib + pybind11 module |
 
 ### 21.2 Test Files
 
@@ -2399,34 +2421,38 @@ in the build skill. The Vulkan backend adds:
 
 ### 21.6 Modified Files
 
-| File | Lines Changed | What Changed |
-|------|--------------|--------------|
-| `TritonToLinalg.cpp` | +183 | AtomicRMWConverter (memref-based), reduce scalar fix, scalar load/store unranked fix |
-| `TritonToLinalgPass.cpp` | +48 | TypeConverter materializations (memref.cast + bufferization tensor↔memref), AtomicRMWOp illegal |
-| `emitter.py` | +125 (net) | Hex float, N-d linearization, 0-d memref, alloca, reshape aliases |
-| `compiler.py` | +21/-18 | binary_ext fix, brace-matching extraction, make_opencl docstring |
-| `PrepareSPIRV.cpp` | -254 | FinalizeSPIRVPass removed, comments updated |
-| `lit.cfg.py` | +5/-8 | Simplified path detection |
-| `.github/skills/triton-windows-vulkan/SKILL.md` | updated | Skill documentation aligned with the unified backend naming and current SPIR-V/Vulkan notes |
+> **Historical note:** the original bring-up tracked exact line deltas here.
+> Those counts drift quickly, so this appendix keeps only the durable summary
+> of what changed.
+
+| File | What Changed |
+|------|--------------|
+| `TritonToLinalg.cpp` | AtomicRMWConverter (memref-based), reduce scalar fix, scalar load/store unranked fix |
+| `TritonToLinalgPass.cpp` | TypeConverter materializations (memref.cast + bufferization tensor↔memref), AtomicRMWOp illegal |
+| `emitter.py` | Hex float, N-d linearization, 0-d memref, alloca, reshape aliases |
+| `compiler.py` | `binary_ext` fix, brace-matching extraction, `make_opencl` docstring |
+| `PrepareSPIRV.cpp` | `FinalizeSPIRVPass` removed, comments updated |
+| `lit.cfg.py` | Simplified path detection |
+| `.github/skills/triton-windows-vulkan/SKILL.md` | Skill documentation aligned with the unified backend naming and current SPIR-V/Vulkan notes |
 
 ### 21.7 New Test Files
 
-| File | Lines | Pattern Tested |
-|------|-------|----------------|
-| `test_vector_add.ttir` | 33 | Masked load + addf + masked store |
-| `test_elementwise_mul.ttir` | 29 | Masked load + mulf + masked store |
-| `test_fma.ttir` | 24 | 3-input multiply-add |
-| `test_gelu.ttir` | 33 | Sigmoid GELU activation (masked) |
-| `test_swiglu.ttir` | 29 | SiLU × gate activation |
-| `test_reduce_sum.ttir` | 28 | Sum reduction (masked) + scalar store |
-| `test_reduce_max.ttir` | 17 | Max reduction + scalar store |
-| `test_softmax.ttir` | 34 | Compound: 2× reduce + exp + div |
-| `test_matmul_simple.ttir` | 37 | 16×16 dot product with reshape |
-| `test_broadcast_add.ttir` | 38 | Dual-source elementwise add |
-| `test_transpose.ttir` | 29 | 16×16 transpose with reshape |
-| `test_atomic_add.ttir` | 14 | Per-element atomic fadd (splat ptr → ranked memref) |
-| `test_kernels.py` | 275 | End-to-end serial OpenCL test harness (14 tests) |
-| `test_kernels_vulkan.py` | 120 | Vulkan SPIR-V dispatch harness (12 tests) |
+| File | Pattern Tested |
+|------|----------------|
+| `test_vector_add.ttir` | Masked load + addf + masked store |
+| `test_elementwise_mul.ttir` | Masked load + mulf + masked store |
+| `test_fma.ttir` | 3-input multiply-add |
+| `test_gelu.ttir` | Sigmoid GELU activation (masked) |
+| `test_swiglu.ttir` | SiLU × gate activation |
+| `test_reduce_sum.ttir` | Sum reduction (masked) + scalar store |
+| `test_reduce_max.ttir` | Max reduction + scalar store |
+| `test_softmax.ttir` | Compound: 2× reduce + exp + div |
+| `test_matmul_simple.ttir` | 16×16 dot product with reshape |
+| `test_broadcast_add.ttir` | Dual-source elementwise add |
+| `test_transpose.ttir` | 16×16 transpose with reshape |
+| `test_atomic_add.ttir` | Per-element atomic fadd (splat ptr → ranked memref) |
+| `test_kernels.py` | End-to-end serial OpenCL test harness (OpenCL test suite) |
+| `test_kernels_vulkan.py` | Vulkan SPIR-V dispatch harness (Vulkan kernel test suite) |
 
 ### 21.8 Op Coverage Matrix
 
@@ -2453,4 +2479,3 @@ in the build skill. The Vulkan backend adds:
 | mask (store) | ✓ | | | ✓ | | | | | | | | |
 | scalar store | | | | | | ✓ | ✓ | | | | | |
 | dense const | | | | ✓ | ✓ | | | | ✓ | | | |
-

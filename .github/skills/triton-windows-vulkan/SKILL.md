@@ -1,6 +1,6 @@
 ---
 name: triton-windows-vulkan
-description: "Foundation Vulkan/SPIR-V backend for triton-windows. Covers the full TTIR→SPIR-V→Vulkan dispatch pipeline: 16 TritonToLinalg converters, 7 bridge passes, VulkanizePass, VulkanCompute runtime, and 18 documented traps. For performance improvements (C+ steps: WorkgroupId, device-local memory, shared memory, subgroups, cooperative matrix), see `triton-windows-vulkan-perf`."
+description: "Foundation Vulkan/SPIR-V backend for triton-windows. Covers the full TTIR→SPIR-V→Vulkan dispatch pipeline: TritonToLinalg conversion, bridge passes, VulkanizePass, VulkanCompute runtime, and documented traps and strategy lessons. For performance improvements (C+ steps: WorkgroupId, device-local memory, shared memory, subgroups, cooperative matrix), see `triton-windows-vulkan-perf`."
 argument-hint: "pipeline | converters | bridge-passes | vulkanize | push-constants | runtime | traps | diagnostics"
 user-invocable: true
 ---
@@ -10,27 +10,27 @@ user-invocable: true
 Complete guide to the Vulkan backend for triton-windows. Covers the full
 pipeline from Triton IR to GPU execution via native Vulkan compute dispatch.
 
-**12/12 kernels verified on RTX 2080 Ti via Vulkan SPIR-V dispatch (incl. cooperative matrix matmul).**
+**Vulkan kernels verified on the target NVIDIA GPU via Vulkan SPIR-V dispatch (run `python third_party/vulkan/test/test_kernels_vulkan.py` to verify).**
 
 ## 1. Architecture
 
 ```
 TTIR → make_ttir → make_linalg → make_memref → make_spirv → make_spv → VulkanCompute → GPU
          shared      C++ pass     bufferize     bridge+convert  serialize   Vulkan dispatch
-         passes      16 converters  +loops+cf    +vulkanize      C++ API     vkCmdDispatch
+         passes      converter set  +loops+cf    +vulkanize      C++ API     vkCmdDispatch
 ```
 
 ### File Layout
 
 | File | Purpose |
 |------|---------|
-| `lib/Conversion/TritonToLinalg.cpp` | 16 converters: Triton→Linalg/Tensor/MemRef |
+| `lib/Conversion/TritonToLinalg.cpp` | The full converter set: Triton→Linalg/Tensor/MemRef (search for `OpConversionPattern` or `patterns.add<`) |
 | `lib/Conversion/TritonToLinalgPass.cpp` | Pass wrapper, TritonTypeConverter, illegal ops |
-| `lib/Conversion/PrepareSPIRV.cpp` | 7 bridge passes + VulkanizePass |
+| `lib/Conversion/PrepareSPIRV.cpp` | The bridge passes (search for pass structs/pattern classes) + VulkanizePass |
 | `lib/Runtime/VulkanCompute.{h,cpp}` | Vulkan compute dispatch engine |
 | `triton_vulkan.cc` | pybind11 module exposing passes + runtime |
 | `backend/compiler.py` | Python pipeline orchestration |
-| `test/test_kernels_vulkan.py` | 12-kernel Vulkan GPU test suite (incl. cooperative matrix) |
+| `test/test_kernels_vulkan.py` | Vulkan GPU test suite (run `python third_party/vulkan/test/test_kernels_vulkan.py` to verify) |
 
 ### Build Commands
 
@@ -50,7 +50,7 @@ python third_party/vulkan/test/test_kernels_vulkan.py
 
 ---
 
-## 2. TritonToLinalg Converters (16 total)
+## 2. TritonToLinalg Converters
 
 ### Type System (TritonTypeConverter)
 
@@ -69,8 +69,8 @@ python third_party/vulkan/test/test_kernels_vulkan.py
 | ExpandDimsConverter | `tt.expand_dims` | `tensor.expand_shape` |
 | TransposeConverter | `tt.trans` | `linalg.transpose` |
 | ReshapeConverter | `tt.reshape` | `tensor.expand/collapse_shape` |
-| GetProgramIDConverter | `tt.get_program_id` | Function arg (last 3 i32s = pid x,y,z) |
-| GetNumProgramsConverter | `tt.get_num_programs` | Function arg |
+| GetProgramIDConverter | `tt.get_program_id` | Function arg (the `program_id` group in the program-info args; count defined by `TRITON_PROGRAM_INFO_ARG_COUNT` in `TritonToLinalgPass.cpp`) |
+| GetNumProgramsConverter | `tt.get_num_programs` | Function arg (program-info args; count defined by `TRITON_PROGRAM_INFO_ARG_COUNT` in `TritonToLinalgPass.cpp`) |
 | MatmulConverter | `tt.dot` | `linalg.matmul` + zero-init |
 | ReduceConverter | `tt.reduce` | `linalg.reduce` with cloned combiner |
 | BitcastConverter | `tt.bitcast` | `arith.bitcast` |
@@ -128,15 +128,19 @@ This is the most complex pass. Core responsibilities (C+ additions in perf skill
 StorageBuffer pointer args → `spirv.GlobalVariable` with `bind(0, N)`
 
 **b) WorkgroupId builtin (C+1):**
-Last 3 scalar args (program_id) → `spirv.GlobalVariable @__builtin_workgroup_id`
+The `program_id` args (last group in the program-info args; see
+`TRITON_PROGRAM_INFO_ARG_COUNT` in `TritonToLinalgPass.cpp`) →
+`spirv.GlobalVariable @__builtin_workgroup_id`
 with `BuiltIn WorkgroupId` + `CompositeExtract` per axis
 
 **c) LocalInvocationId builtin (C+3):**
-Next 3 scalar args (local_id) → `spirv.GlobalVariable @__builtin_local_invocation_id`
+The `local_id` args (the group immediately before `program_id` in the
+program-info args) → `spirv.GlobalVariable @__builtin_local_invocation_id`
 with `BuiltIn LocalInvocationId` + `CompositeExtract`
 
 **d) Push constants:**
-Remaining scalar args (N, num_programs, etc.) → `PushConstant` struct
+Remaining scalar args from the program-info layout (`TRITON_PROGRAM_INFO_ARG_COUNT`
+in `TritonToLinalgPass.cpp`) → `PushConstant` struct
 
 **e) Shared memory promotion (C+3):**
 Detects `spirv.Variable` with array size matching `vulkan.local_size` attribute.
@@ -211,7 +215,7 @@ Falls back to host-visible-only on integrated GPUs. BAR memory
 | V5 | 2D alloc flatten: walk, not pattern | Pattern causes domination errors |
 | V6 | `convert-math-to-spirv` required | Link `MLIRMathToSPIRV`, add to pipeline |
 
-### MLIR API Traps (LLVM commit 87717bf)
+### MLIR API Traps (for the MLIR API version pinned by the repo; see `cmake/llvm-hash.txt`)
 
 | API | Correct Usage |
 |-----|---------------|
@@ -260,7 +264,7 @@ These are current limitations in the codebase, not bugs:
 | `ConvertReductionToParallel` 1D-only | `PrepareSPIRV.cpp` | Only handles 1D static power-of-2 reductions |
 | `memref.copy` expansion 1D-only | `PrepareSPIRV.cpp` | Multi-dim or dynamic copies remain unlowered |
 | 2D flattening rank-2 static only | `PrepareSPIRV.cpp` | Other ranks/dynamic shapes fall through |
-| Subgroup size default 32 | `PrepareSPIRV.cpp` | Set `vulkan.subgroup_size` module attribute for non-NVIDIA GPUs |
+| Subgroup size default comes from `SUBGROUP_SIZE` (search for it in `PrepareSPIRV.cpp`) | `PrepareSPIRV.cpp` | Set `vulkan.subgroup_size` module attribute for GPUs whose subgroup width differs from the default |
 | `driver.py` is a stub | `backend/driver.py` | `is_active()` always returns False; manual test flow only |
 
 ### Correctness Invariants (must not violate)
@@ -286,17 +290,17 @@ If starting from a fresh clone, follow this order:
 ### Phase 1: Foundation (base skill — this document)
 
 1. **Build triton-windows** — use `triton-windows-build` skill
-2. **Implement 16 TritonToLinalg converters** (TritonToLinalg.cpp, ~1350 lines)
+2. **Implement the full TritonToLinalg converter set** (`TritonToLinalg.cpp`; search for `OpConversionPattern` or `patterns.add<` to see the current list)
    - Start with FMA kernel (simplest: no masks, no scalars)
    - Add converters incrementally: splat → range → broadcast → addptr → load → store → dot → reduce
    - Test each with `str_nodebug()` dumps, NOT with GPU dispatch yet
-3. **Implement 7 bridge passes** (PrepareSPIRV.cpp, ~500 lines)
+3. **Implement the bridge passes** (`PrepareSPIRV.cpp`; search for the pass structs and pattern classes to find the current set)
    - Must run BEFORE upstream `convert-*-to-spirv`
    - Key insight: upstream SPIR-V passes assume structured IR; Triton's pointer-heavy IR needs bridge
-4. **Implement VulkanizePass** (PrepareSPIRV.cpp, ~400 lines)
+4. **Implement VulkanizePass** (`PrepareSPIRV.cpp`; search for `struct VulkanizePass` or `class VulkanizePass`)
    - This is the critical innovation: func args → Vulkan GlobalVariables/builtins
    - Without it, NVIDIA driver crashes at pipeline creation
-5. **Implement VulkanCompute runtime** (VulkanCompute.{h,cpp}, ~600 lines)
+5. **Implement VulkanCompute runtime** (`VulkanCompute.{h,cpp}`)
    - VkInstance → VkDevice → VkBuffer → VkShaderModule → VkPipeline → vkCmdDispatch
 6. **Wire Python pipeline** (compiler.py) + pybind11 (triton_vulkan.cc)
 7. **First GPU test**: vector_add (verify end-to-end)
@@ -336,3 +340,16 @@ module attributes (C+3), and GlobalVariable manipulation (C+1/C+3).
    Only AtomicRMWConverter needs it.
 6. **OpenCL was scaffolding** — useful for debugging, not a prerequisite.
    New developers should skip it and debug via MLIR IR dumps.
+
+---
+
+## 11. Adapting to Upstream Changes
+
+This skill documents patterns and principles, not exact code locations.
+When upstream Triton or MLIR changes:
+
+1. **Search, don't assume line numbers.** Use `rg "OpConversionPattern|patterns.add<|struct .*Pass|class VulkanizePass" third_party\vulkan` to find the current converter and pass definitions.
+2. **Verify arg layout.** Check `TRITON_PROGRAM_INFO_ARG_COUNT` in `third_party\vulkan\lib\Conversion\TritonToLinalgPass.cpp`; if it changed, update all `get_program_id`, `get_num_programs`, `local_id`, and push-constant index math.
+3. **Verify test suite.** Run `python third_party\vulkan\test\test_kernels_vulkan.py` — the test count may change, but all tests should pass.
+4. **Verify pass ordering.** Print IR after each stage with `str_nodebug()` and look for unconverted `memref.*`, `gpu.*`, or `func.*` ops.
+5. **Verify VCE triple.** Check that `spirv.module` capabilities match the ops actually emitted for basic shaders, subgroup ops, and cooperative matrix ops.
