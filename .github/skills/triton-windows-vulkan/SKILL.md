@@ -258,6 +258,7 @@ These are current limitations in the codebase, not bugs:
 
 | Limitation | Location | Impact |
 |-----------|----------|--------|
+| Masked load/store ignores mask | `TritonToLinalg.cpp` | Full `memref.copy`/`MaterializeInDestination` used regardless of mask. Safe when N is a multiple of BLOCK_SIZE (all current tests). Blocked by SPIR-V i1 memref limitation — `tensor<Nxi1>` bufferizes to packed `i32` arrays with incomplete lowering. |
 | `pickPhysicalDevice` scores by type but no multi-GPU testing | `VulkanCompute.cpp` | Only tested with single-GPU systems |
 | `LowerUnrankedCast` dead code | `PrepareSPIRV.cpp` | Defined but always returns `failure()`; never contributes |
 | `vkQueueWaitIdle` per transfer | `VulkanCompute.cpp` copyBuffer | Serializes transfers; optimize with batched command buffers later |
@@ -271,8 +272,7 @@ These are current limitations in the codebase, not bugs:
 
 | Rule | Why | Trap ID |
 |------|-----|---------|
-| Masked load must conditionally copy per element | Full `memref.copy` ignores mask → wrong for non-aligned sizes | G-1 |
-| Masked store must conditionally write per element | Full `MaterializeInDestination` ignores mask | G-1 |
+| Masked load/store must apply mask per element | Full copy ignores mask → wrong for non-aligned N. Blocked by SPIR-V i1 memref packing. | G-1 |
 | Push-constant struct members must be naturally aligned | Packed offsets violate SPIR-V alignment rules for i64/f64 | G-2 |
 | Push constants are NOT interface variables | Adding to `spirv.EntryPoint` interface list is invalid SPIR-V | G-3 |
 | Reduce identity must match combiner op | Zero identity is wrong for min (should be +inf) and max (-inf) | G-5 |

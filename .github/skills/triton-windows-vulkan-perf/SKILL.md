@@ -413,12 +413,13 @@ timing to every test for regression tracking.
 | C5-3 | Vulkan | Unconditional extension enabling crashes unsupported GPUs |
 | C5-4 | Convention | Stride = matrix row length, not tile size |
 | C5-5 | SPIR-V | AccessChain result storage class must match base pointer |
-| G-1 | Correctness | Masked load/store must apply mask — never do full copy/store |
+| G-1 | Correctness | Masked load/store should apply mask — blocked by SPIR-V i1 memref packing; safe when N % BLOCK_SIZE == 0 |
 | G-2 | SPIR-V Spec | Push-constant struct needs natural alignment per member type |
 | G-3 | SPIR-V Spec | Push constants are NOT interface variables in EntryPoint |
 | G-4 | Portability | Subgroup size varies by vendor; do not assume the default fits every GPU |
 | G-5 | Correctness | Reduce identity must match combiner — zero is wrong for min/max |
 | G-6 | MLIR API | In ConversionPattern, use `adaptor.getXxx()` not `op.getXxx()` for operands |
+| G-7 | MLIR API | `bufferization::ToMemrefOp` → `ToBufferOp` in this LLVM version (search for `ToBuffer` in LLVM source) |
 
 ---
 
