@@ -58,7 +58,16 @@ void VulkanCompute::pickPhysicalDevice() {
         throw std::runtime_error("Failed to enumerate Vulkan physical devices");
     }
 
-    // Pick first device with a compute queue
+    // Score each device: prefer discrete GPU > integrated > other.
+    // Among same type, pick the first with a compute queue.
+    struct Candidate {
+        VkPhysicalDevice device;
+        uint32_t queueFamily;
+        VkPhysicalDeviceProperties props;
+        int score;
+    };
+    std::vector<Candidate> candidates;
+
     for (auto& dev : devices) {
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &queueFamilyCount, nullptr);
@@ -68,29 +77,44 @@ void VulkanCompute::pickPhysicalDevice() {
 
         for (uint32_t i = 0; i < queueFamilyCount; ++i) {
             if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                physicalDevice_ = dev;
-                computeQueueFamily_ = i;
-
                 VkPhysicalDeviceProperties props;
                 vkGetPhysicalDeviceProperties(dev, &props);
-                physicalDeviceProperties_ = props;
-                deviceName_ = props.deviceName;
 
-                // Query subgroup size (Vulkan 1.1+)
-                VkPhysicalDeviceSubgroupProperties subgroupProps{};
-                subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-                VkPhysicalDeviceProperties2 props2{};
-                props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-                props2.pNext = &subgroupProps;
-                vkGetPhysicalDeviceProperties2(dev, &props2);
-                subgroupSize_ = subgroupProps.subgroupSize;
+                int score = 0;
+                if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+                    score = 3;
+                else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+                    score = 2;
+                else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)
+                    score = 1;
 
-                return;
+                candidates.push_back({dev, i, props, score});
+                break; // one candidate per device
             }
         }
     }
 
-    throw std::runtime_error("No GPU with compute queue found");
+    if (candidates.empty()) {
+        throw std::runtime_error("No GPU with compute queue found");
+    }
+
+    // Pick highest-scoring device
+    auto& best = *std::max_element(candidates.begin(), candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.score < b.score; });
+
+    physicalDevice_ = best.device;
+    computeQueueFamily_ = best.queueFamily;
+    physicalDeviceProperties_ = best.props;
+    deviceName_ = best.props.deviceName;
+
+    // Query subgroup size (Vulkan 1.1+)
+    VkPhysicalDeviceSubgroupProperties subgroupProps{};
+    subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &subgroupProps;
+    vkGetPhysicalDeviceProperties2(physicalDevice_, &props2);
+    subgroupSize_ = subgroupProps.subgroupSize;
 }
 
 void VulkanCompute::createLogicalDevice() {

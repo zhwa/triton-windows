@@ -303,7 +303,8 @@ third_party/vulkan/
 | Shared memory reductions | ✅ | Workgroup storage class + tree reduction + ControlBarrier (C+3) |
 | Subgroup operations | ✅ | `OpGroupNonUniform*` for fast intra-warp reductions (C+4) |
 | Cooperative matrix | ✅ | `VK_KHR_cooperative_matrix` + buffer-forwarding for matmul (C+5) |
-| Discrete GPU selection | 🔲 | Prefer `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` (C+6) |
+| Discrete GPU selection | ✅ | Prefer `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` over integrated (C+6) |
+| Performance baseline | ✅ | Compile + dispatch timing per kernel (warmup + 5-run average) |
 
 > **Why not TritonGPU → LLVM → SPIR-V (Path A)?** Intel's TTGIR→LLVM is 80%
 > Intel-specific (DPAS, 2D block loads). NVIDIA's is equally PTX-locked (~7K

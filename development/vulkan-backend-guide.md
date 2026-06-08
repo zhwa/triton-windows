@@ -2162,7 +2162,20 @@ VCE triple conditionally upgraded to V_1_6 with CooperativeMatrixKHR,
 Float16, and StorageBuffer16BitAccess capabilities. Device extensions
 queried via `vkEnumerateDeviceExtensionProperties` before enabling.
 
-### 18.7 Current VulkanizePass Responsibilities
+### 18.7 C+6: Discrete GPU Selection + Performance Baseline
+
+**Problem:** `pickPhysicalDevice` selected the first device with a compute
+queue, which could be an integrated GPU even when a discrete GPU was available.
+No timing data existed for regression tracking.
+
+**Solution:**
+1. **GPU scoring** in `pickPhysicalDevice()`: discrete=3, integrated=2, virtual=1.
+   Uses `std::max_element` to pick the highest-scoring device with a compute queue.
+2. **Compile timing**: `time.perf_counter()` around the 5-stage pipeline in `comp()`.
+3. **Dispatch timing**: 1 warmup + 5 timed dispatches, averaged, in `run()`.
+4. **Results format**: Table with Compile (ms) and Dispatch (µs) columns per kernel.
+
+### 18.8 Current VulkanizePass Responsibilities
 
 After C+1 through C+5, VulkanizePass handles 9 responsibilities:
 1. Buffer args → GlobalVariables with descriptor bindings
@@ -2175,7 +2188,7 @@ After C+1 through C+5, VulkanizePass handles 9 responsibilities:
 8. Cooperative matrix replacement with buffer-forwarding (C+5)
 9. Module wrapping (spirv.module, EntryPoint, ExecutionMode)
 
-### 18.8 Test Suite Evolution
+### 18.9 Test Suite Evolution
 
 | Milestone | Tests | Key additions |
 |-----------|-------|---------------|
@@ -2191,8 +2204,8 @@ After C+1 through C+5, VulkanizePass handles 9 responsibilities:
 
 | Item | Priority | Description |
 |------|----------|-------------|
-| Performance baseline | Medium | Time kernels vs CUDA/OpenCL and establish a C+ performance baseline |
-| Discrete GPU preference | Medium | Prefer true discrete GPUs/VRAM heaps when multiple Vulkan devices are present |
+| ~~Performance baseline~~ | ~~Medium~~ | ✅ Done — compile (ms) + dispatch (µs) timing per kernel, warmup + 5-run average |
+| ~~Discrete GPU preference~~ | ~~Medium~~ | ✅ Done — `pickPhysicalDevice` scores: discrete=3, integrated=2, virtual=1 (C+6) |
 | Dynamic shapes | Medium | Relax fixed-shape assumptions in tests, metadata, and push-constant packing |
 | Autotuning | Medium | Explore block-size, subgroup-size, and cooperative-matrix tuning strategies |
 | `@triton.jit` integration | Medium | Wire the backend into Triton's higher-level launch/runtime flow |

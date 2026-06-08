@@ -887,7 +887,7 @@ passes and Vulkan SPIR-V extensions that NVIDIA Turing supports.
 | C+3 | Workgroup shared memory | `Workgroup` storage class + barriers | ✅ Done |
 | C+4 | Subgroup ops for reductions | `OpGroupNonUniformFAdd/FMax` | ✅ Done |
 | C+5 | Cooperative matrix for matmul | `OpCooperativeMatrixMulAddKHR` | ✅ Done |
-| C+6 | Discrete GPU selection | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | 🔲 Future |
+| C+6 | Discrete GPU selection | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | ✅ Done |
 
 **Why C+ beats Path A for our situation:**
 

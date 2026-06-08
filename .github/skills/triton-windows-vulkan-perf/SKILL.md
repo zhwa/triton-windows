@@ -34,6 +34,8 @@ Do NOT attempt C+5 without completing C+1–C+4 first.
 | C+3 | Workgroup shared memory | PrepareSPIRV.cpp, TritonToLinalg*.cpp, compiler.py, triton_vulkan.cc, CMakeLists.txt | C3-* | ✅ |
 | C+4 | Subgroup operations | PrepareSPIRV.cpp, VulkanCompute.{h,cpp}, triton_vulkan.cc | C4-* | ✅ |
 | C+5 | Cooperative matrix | PrepareSPIRV.cpp, VulkanCompute.cpp, compiler.py, test | C5-* | ✅ |
+| C+6 | Discrete GPU selection | VulkanCompute.cpp | — | ✅ |
+| — | Performance baseline | test_kernels_vulkan.py | — | ✅ |
 
 ---
 
@@ -354,7 +356,43 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 ---
 
-## 7. Traps Reference
+## 7. C+6: Discrete GPU Selection + Performance Baseline
+
+**Goal:** Prefer discrete GPUs over integrated, and add compile/dispatch
+timing to every test for regression tracking.
+
+### How to Reproduce
+
+1. **`pickPhysicalDevice()`** in `VulkanCompute.cpp` (search for `pickPhysicalDevice`):
+   - Enumerate all physical devices
+   - Score each by `VkPhysicalDeviceType`: discrete=3, integrated=2, virtual=1, other=0
+   - For each device, find the first compute-capable queue family
+   - Pick the highest-scoring device (use `std::max_element`)
+
+2. **Compile timing** in `compiler.py` `comp()` function:
+   - Wrap the 5-stage pipeline (`make_ttir` → `make_spv`) with `time.perf_counter()`
+   - Store result as `md["compile_ms"]`
+
+3. **Dispatch timing** in `test_kernels_vulkan.py` `run()` function:
+   - 1 warmup dispatch (not timed)
+   - 5 timed dispatches, average as `md["dispatch_us"]`
+   - Return timing in the results tuple: `(name, error, tolerance, compile_ms, dispatch_us)`
+
+4. **Output format**: Table with Compile (ms) and Dispatch (µs) columns,
+   plus summary line with totals.
+
+### What Changed
+
+| Component | Change |
+|-----------|--------|
+| `pickPhysicalDevice()` | Scoring system instead of "first match wins" |
+| `comp()` | `time.perf_counter()` around pipeline stages |
+| `run()` | Warmup + 5-run average dispatch timing |
+| Results tuple | 5-element: `(name, err, tol, compile_ms, dispatch_us)` |
+
+---
+
+## 8. Traps Reference
 
 | ID | Category | One-liner |
 |----|----------|-----------|
@@ -384,7 +422,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 ---
 
-## 8. Strategy Lessons
+## 9. Strategy Lessons
 
 1. **Get it working first, then make it fast.** The base skill achieves
    correctness. This skill achieves performance. Never mix the two.
@@ -422,7 +460,7 @@ VulkanizePass AccessChain into StorageBuffer GlobalVariables directly.
 
 ---
 
-## 9. Adapting to Upstream Changes
+## 10. Adapting to Upstream Changes
 
 This skill documents patterns and principles, not exact code locations.
 When upstream Triton or MLIR changes:

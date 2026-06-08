@@ -258,7 +258,7 @@ These are current limitations in the codebase, not bugs:
 
 | Limitation | Location | Impact |
 |-----------|----------|--------|
-| `pickPhysicalDevice` no discrete preference | `VulkanCompute.cpp` | May select integrated GPU over discrete |
+| `pickPhysicalDevice` scores by type but no multi-GPU testing | `VulkanCompute.cpp` | Only tested with single-GPU systems |
 | `LowerUnrankedCast` dead code | `PrepareSPIRV.cpp` | Defined but always returns `failure()`; never contributes |
 | `vkQueueWaitIdle` per transfer | `VulkanCompute.cpp` copyBuffer | Serializes transfers; optimize with batched command buffers later |
 | `ConvertReductionToParallel` 1D-only | `PrepareSPIRV.cpp` | Only handles 1D static power-of-2 reductions |
@@ -307,7 +307,7 @@ If starting from a fresh clone, follow this order:
 
 ### Phase 2: Performance (perf skill — `triton-windows-vulkan-perf`)
 
-Follow C+1 → C+5 **in order**. Each builds on the previous:
+Follow C+1 → C+6 **in order**. Each builds on the previous:
 
 | Step | What You Learn | Infrastructure Created |
 |------|---------------|----------------------|
@@ -316,6 +316,7 @@ Follow C+1 → C+5 **in order**. Each builds on the previous:
 | C+3 | Shared memory, barriers, module attributes | ConvertReductionToParallel, shared var promotion |
 | C+4 | Subgroup operations | GroupNonUniform ops, combiner classification |
 | C+5 | Buffer-forwarding architecture | traceToFuncArg, attribute-based operand passing |
+| C+6 | Device selection, perf baseline | GPU scoring, compile/dispatch timing |
 
 **Do NOT skip steps.** C+5 depends on the placeholder pattern (C+1/C+3),
 module attributes (C+3), and GlobalVariable manipulation (C+1/C+3).
