@@ -1747,21 +1747,35 @@ python vulkan-opt.py test.mlir --pipeline arith --roundtrip
 
 Available pipelines: `arith`, `linalg`, `gpu`, `memref`, `full`, `math`.
 
-### 15.3 diagnose-spirv.py (Trap Detection)
+### 15.3 triton-director (Pipeline Inspector & Timer)
 
-A diagnostic tool that checks IR for known SPIR-V conversion issues:
+The `triton-director` skill (`.github/skills/triton-director/`) provides a
+unified CLI for pipeline inspection, per-pass timing, environment checking,
+and test execution:
 
-```bash
-# Check a single MLIR file
-python diagnose-spirv.py lowered.mlir convert
+```powershell
+$env:TRITON_BACKENDS_IN_TREE = "1"
 
-# Run the full pipeline and diagnose each stage
-python diagnose-spirv.py --pipeline vector_add.ttir
+# Discover skills, tools, docs, test kernels
+python .github\skills\triton-director\scripts\director.py scan
+
+# Check environment (Python, conda, MSVC, triton, Vulkan)
+python .github\skills\triton-director\scripts\director.py env --check
+
+# Capture IR at every stage with dialect statistics
+python .github\skills\triton-director\scripts\director.py inspect test.ttir --stats
+
+# Per-pass compilation timing
+python .github\skills\triton-director\scripts\director.py time test.ttir --runs 3
+
+# Run the full Vulkan GPU test suite
+python .github\skills\triton-director\scripts\director.py test
 ```
 
-The `--pipeline` mode instantiates the `VulkanBackend`, runs each stage, and
-reports per-stage diagnostics. It checks for all 10 traps documented in the
-unified `triton-windows-vulkan` skill.
+The `inspect` command replaces manual `str_nodebug()` workflows. The `--diff`
+flag shows unified diffs between consecutive stages — useful for spotting
+which pass introduces a bug. The `--out DIR` flag writes one `.mlir` file per
+stage plus a `manifest.json` for programmatic use.
 
 ### 15.4 Manual End-to-End Verification
 
@@ -2327,9 +2341,13 @@ recurrence:
 **Masked load/store must actually apply the mask (G-1).** The original
 `LoadConverter` filled the destination with the `other` value, then did a
 full `memref.copy` from the source — overwriting the fill, making the mask
-useless. The fix uses `linalg.generic` with `arith.select` to conditionally
-copy per element: `select(mask, source, other)`. Same pattern for stores:
-use `linalg.generic` to selectively write where mask is true.
+useless. The correct fix is per-element conditional copy (e.g.,
+`linalg.generic` + `arith.select`), but this is currently **blocked** by
+SPIR-V's lack of native i1 memref support (`tensor<Nxi1>` bufferizes to
+packed `i32` arrays with incomplete lowering). The code currently uses full
+`memref.copy` / `MaterializeInDestination` regardless of mask — safe when N
+is a multiple of BLOCK_SIZE (all current tests), but incorrect for
+non-aligned sizes. This is a documented known limitation.
 
 **Push-constant struct alignment matters (G-2).** SPIR-V requires each struct
 member to be aligned to its natural alignment. The original code packed offsets
@@ -2407,7 +2425,9 @@ in the build skill. The Vulkan backend adds:
 | File | Purpose |
 |------|---------|
 | `.github/skills/triton-windows-vulkan/SKILL.md` | Unified Vulkan/SPIR-V backend skill with the current traps, passes, push-constant, and runtime notes |
+| `.github/skills/triton-windows-vulkan-perf/SKILL.md` | Path C+ performance improvements (C+1–C+6), traps registry, strategy lessons |
 | `.github/skills/triton-windows-opencl/SKILL.md` | Unified OpenCL/emitter skill covering the serial and parallel debugging paths |
+| `.github/skills/triton-director/SKILL.md` | Pipeline inspection, timing, environment, and debugging tools (includes `inspector.py`, `timer.py`, `director.py`) |
 
 ### 21.5 Conversion Pattern Reference
 
@@ -2426,8 +2446,8 @@ in the build skill. The Vulkan backend adds:
 | `ReshapeConverter` | `tt.reshape` | `tensor.expand/collapse_shape` | TritonToLinalg conversion |
 | `DenseConstantConverter` | `arith.constant (splat)` | `tensor.empty + linalg.fill` | TritonToLinalg conversion |
 | `AddPtrConverter` | `tt.addptr` | `memref.reinterpret_cast` | Pointer analysis and memory ops |
-| `LoadConverter` | `tt.load` | `memref.alloc + fill + select(mask, src, other)` | Pointer analysis and memory ops |
-| `StoreConverter` | `tt.store` | `select(mask, val, existing) → dest` or `materialize_in_destination` | Pointer analysis and memory ops |
+| `LoadConverter` | `tt.load` | `memref.alloc + fill(other) + memref.copy` (mask not applied — see G-1 limitation) | Pointer analysis and memory ops |
+| `StoreConverter` | `tt.store` | `materialize_in_destination` (mask not applied — see G-1 limitation) | Pointer analysis and memory ops |
 | `ExpandReinterpretCast` | `memref.reinterpret_cast` | `memref.load/store with adjusted index` | SPIR-V conversion |
 | `ExpandMemRefCopy` | `memref.copy` | `scf.for { load; store }` | SPIR-V conversion |
 | `RemoveDealloc` | `memref.dealloc` | (erased) | SPIR-V conversion |

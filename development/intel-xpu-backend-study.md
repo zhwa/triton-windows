@@ -27,7 +27,7 @@ about our NVIDIA+Vulkan target vs Intel's native XPU target.
 9. [Key Design Patterns Worth Borrowing](#9-key-design-patterns-worth-borrowing)
 10. [What's Fundamentally Different for Us](#10-whats-fundamentally-different-for-us)
 11. [Feasibility Assessment for triton-windows](#11-feasibility-assessment-for-triton-windows)
-12. [Recommended Approach](#12-recommended-approach)
+12. [Updated Feasibility Assessment (June 2025)](#12-updated-feasibility-assessment-june-2025)
 13. [Appendix: File Inventory](#13-appendix-file-inventory)
 
 ---
