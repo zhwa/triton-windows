@@ -1,0 +1,926 @@
+{
+  "generated_from": "D:\\code-dive\\triton-ppd",
+  "generated_at": "2026-06-12T22:51:34Z",
+  "note": "Self-contained index distilled from triton-ppd. Regenerate with generate_index.py.",
+  "chapter_dag": "ch.01 ──► ch.02 ──► ch.03 ──► ch.04 ──► ch.05 ──► ch.06 ──► ch.07\n                                                      │\n                     ch.08 (LinearLayout) ◄────────────┘\n                        │\n                   ┌────┴─────┬──────────────┐\n                   ▼          ▼              ▼\n                ch.09      ch.10          ch.11\n             (Blocked)   (MMA+DotOp)    (SwizzledShared)\n                   │          │              │\n                   └────┬─────┘              │\n                        ▼                    │\n                     ch.12 (Coalesce)         │\n                        │                    │\n                     ch.13 (LayoutProp)       │\n                        │                    │\n                     ch.14 (LayoutRemat)      │\n                        │                    │\n                     ch.15 (Accel+DotOp)      │\n                        │                    │\n                     ch.16 (TTGIR→LLVM) ◄─────┘\n                        │\n                     ch.17 (NVIDIA TargetInfo)\n                        │\n                     ch.18 (LLVM→PTX→cubin)\n                        │\n                  ┌─────┴──────┐\n                  ▼            ▼\n               ch.19 (E2E)  ch.20 (Capstone)",
+  "components": [
+    {
+      "name": "LinearLayout",
+      "category": "Encoding System (Thesis Core)",
+      "spec_file": "docs/spec/linear-layout.md",
+      "chapter": "ch.08",
+      "blurb": "`LinearLayout` GF(2) algebra — the mathematical spine",
+      "maturity": "L3",
+      "reference_source": [
+        "include/triton/Tools/LinearLayout.h",
+        "lib/Tools/LinearLayout.cpp"
+      ],
+      "motivation": "Every TTGIR tensor carries an encoding attribute (`#ttg.blocked`, `#ttg.nvidia_mma`, `#ttg.dot_op`, `#ttg.swizzled_shared`) that describes how tensor elements are distributed across GPU hardware coordinates `{register, lane, warp, block}`. Without a **unified mathematical representation**, each encoding would need bespoke code for every optimization: coalescing, conversion removal, MMA selection, and swizzling. `LinearLayout` provides that unification — all encodings reduce to a single GF(2) linear function, and all optimizations become algebraic operations on that function.",
+      "reference_chapter": "ch.08.LinearLayout",
+      "textbook": "book-zh/ch.08.LinearLayout.md"
+    },
+    {
+      "name": "BlockedEncoding",
+      "category": "Encoding System (Thesis Core)",
+      "spec_file": "docs/spec/blocked-encoding.md",
+      "chapter": "ch.09",
+      "blurb": "`BlockedEncoding` → `LinearLayout` via `identityStandardND`",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp:889–897"
+      ],
+      "motivation": "`BlockedEncoding` is the default encoding assigned by `ConvertTritonToTritonGPU` (ch.06). It divides a tensor into rectangular tiles, each owned by one thread. The four parameters (`sizePerThread`, `threadsPerWarp`, `warpsPerCTA`, `order`) fully determine which thread owns which element. Converting these parameters to a `LinearLayout` enables all downstream optimizations to work uniformly — they query `getNumConsecutiveInOut()`, `sublayout()`, and `invertAndCompose()` without knowing the encoding type.",
+      "reference_chapter": "ch.09.BlockedEncoding",
+      "textbook": "book-zh/ch.09.BlockedEncoding.md"
+    },
+    {
+      "name": "NvidiaMmaEncoding",
+      "category": "Encoding System (Thesis Core)",
+      "spec_file": "docs/spec/mma-encoding.md",
+      "chapter": "ch.10",
+      "blurb": "`NvidiaMmaEncoding` + `DotOperandEncoding` fragment mapping",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp:940–1054"
+      ],
+      "motivation": "`NvidiaMmaEncoding` describes the layout of the result tensor from a `mma.sync.aligned.m16n8k16` instruction. Each of the 32 lanes in a warp holds specific fragments of the 16×8 result tile. `DotOperandEncoding` describes the layout of the input operands (A and B) that feed into the MMA instruction. It must match the hardware's expected fragment distribution for `ldmatrix` + `mma.sync` to work correctly.",
+      "reference_chapter": "ch.10.MMA-DotOperand-Encoding",
+      "textbook": "book-zh/ch.10.MMA-DotOperand-Encoding.md"
+    },
+    {
+      "name": "SwizzledSharedEncoding",
+      "category": "Encoding System (Thesis Core)",
+      "spec_file": "docs/spec/swizzled-shared-encoding.md",
+      "chapter": "ch.11",
+      "blurb": "`SwizzledSharedEncoding` XOR bank-conflict elimination",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp:49–113"
+      ],
+      "motivation": "Shared memory on NVIDIA GPUs has 32 banks. When multiple threads in a warp access the same bank simultaneously (but different addresses within that bank), the accesses are serialized — a **bank conflict**. `SwizzledSharedEncoding` eliminates bank conflicts by XOR-ing the column address with a row-dependent phase:",
+      "reference_chapter": "ch.11.SwizzledShared-Encoding",
+      "textbook": "book-zh/ch.11.SwizzledShared-Encoding.md"
+    },
+    {
+      "name": "ttgir-encoding-interfaces",
+      "category": "Encoding System (Thesis Core)",
+      "spec_file": "docs/spec/ttgir-encoding-interfaces.md",
+      "chapter": "ch.05",
+      "blurb": "Encoding attribute inventory and interface contract",
+      "maturity": "L2",
+      "motivation": "TTGIR encoding attributes describe how tensor elements are distributed across GPU threads. Each encoding can be reduced to a `LinearLayout` — a GF(2) linear function mapping `{register, lane, warp, block}` to tensor coordinates.",
+      "reference_chapter": "ch.05.TTGIR-Dialect",
+      "textbook": "book-zh/ch.05.TTGIR-Dialect.md"
+    },
+    {
+      "name": "CoalescePass",
+      "category": "Optimization Passes (Thesis Core)",
+      "spec_file": "docs/spec/coalesce-pass.md",
+      "chapter": "ch.12",
+      "blurb": "`CoalescePass` — vectorized memory access (T3a)",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp"
+      ],
+      "motivation": "After `ConvertTritonToTritonGPU` (ch.06), all tensors have `sizePerThread={1,...}` — each thread handles one element at a time. This wastes memory bandwidth: NVIDIA GPUs can load 4–8 elements per thread in a single vectorized instruction. CoalescePass analyzes pointer contiguity and increases `sizePerThread` to enable vectorized loads/stores.",
+      "reference_chapter": "ch.12.CoalescePass",
+      "textbook": "book-zh/ch.12.CoalescePass.md"
+    },
+    {
+      "name": "RemoveLayoutConversions",
+      "category": "Optimization Passes (Thesis Core)",
+      "spec_file": "docs/spec/layout-propagation.md",
+      "chapter": "ch.13",
+      "blurb": "`RemoveLayoutConversions` 4-phase algorithm (T3b)",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp"
+      ],
+      "motivation": "Eliminate unnecessary `ttg.convert_layout` operations by propagating encodings through **encoding-agnostic** ops (arith, splat, broadcast, etc.). This is thesis **T3b**: without layout-conversion removal, the pipeline would insert O(n) convert_layout ops between every pair of differently-encoded ops, each requiring a full shared-memory round-trip.",
+      "reference_chapter": "ch.13.LayoutPropagation",
+      "textbook": "book-zh/ch.13.LayoutPropagation.md"
+    },
+    {
+      "name": "LayoutRematerialization",
+      "category": "Optimization Passes (Thesis Core)",
+      "spec_file": "docs/spec/layout-rematerialization.md",
+      "chapter": "ch.14",
+      "blurb": "`LayoutRematerialization` 3 hoisting strategies (T3b)",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp"
+      ],
+      "motivation": "Eliminate `ttg.convert_layout` operations that survived RemoveLayoutConversions (ch.13) by **rematerializing** the convert's source backward slice in the target encoding, or by **hoisting** the convert above type-widening ops.",
+      "reference_chapter": "ch.14.LayoutRematerialization",
+      "textbook": "book-zh/ch.14.LayoutRematerialization.md"
+    },
+    {
+      "name": "AccelerateMatmul",
+      "category": "Optimization Passes (Thesis Core)",
+      "spec_file": "docs/spec/accelerate-matmul.md",
+      "chapter": "ch.15",
+      "blurb": "`AccelerateMatmul` MMA instruction selection (T3c)",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp"
+      ],
+      "motivation": "Replace `tt.dot` operations that carry `BlockedEncoding` with MMA-encoded dots using `NvidiaMmaEncodingAttr`. This is the **instruction selection** step: the encoding directly determines which tensor core instruction (`mma.sync.aligned.m16n8k16`) will be emitted in the LLVM lowering.",
+      "reference_chapter": "ch.15.AccelerateMatmul",
+      "textbook": "book-zh/ch.15.AccelerateMatmul.md"
+    },
+    {
+      "name": "ConvertTritonGPUToLLVM",
+      "category": "Lowering & Backend",
+      "spec_file": "docs/spec/ttgir-to-llvm.md",
+      "chapter": "ch.16",
+      "blurb": "`ConvertTritonGPUToLLVM` — tensor→struct lowering",
+      "maturity": "L3",
+      "reference_source": [
+        "lib/Conversion/TritonGPUToLLVM/"
+      ],
+      "motivation": "Convert TTGIR (device-aware tensor IR) to LLVM dialect. This is the final IR-to-IR transformation before LLVM IR emission. The key transformation: **distributed tensors become structs of per-thread elements**.",
+      "reference_chapter": "ch.16.TTGIRToLLVM",
+      "textbook": "book-zh/ch.16.TTGIRToLLVM.md"
+    },
+    {
+      "name": "NVIDIATargetInfo",
+      "category": "Lowering & Backend",
+      "spec_file": "docs/spec/nvidia-target-info.md",
+      "chapter": "ch.17",
+      "blurb": "`NVIDIATargetInfo` — PTX inline asm generation",
+      "maturity": "L2",
+      "reference_source": [
+        "third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/TargetInfo.cpp",
+        "LoadStoreOpToLLVM.cpp"
+      ],
+      "motivation": "Provide target-specific PTX inline assembly for shared memory operations and MMA operand loading, decoupled from the TTGIR→LLVM lowering framework via the `TargetInfoBase` virtual interface.",
+      "reference_chapter": "ch.17.NVIDIATargetInfo",
+      "textbook": "book-zh/ch.17.NVIDIATargetInfo.md"
+    },
+    {
+      "name": "ttir-ops",
+      "category": "IR & Dialect Definitions",
+      "spec_file": "docs/spec/ttir-ops.md",
+      "chapter": "ch.04",
+      "blurb": "TTIR dialect: 24 ops, types, enums",
+      "maturity": "L2",
+      "motivation": "TTIR is the device-independent intermediate representation. It expresses tensor-level semantics without any notion of threads, warps, or encodings.",
+      "reference_chapter": "ch.04.TTIR-Dialect",
+      "textbook": "book-zh/ch.04.TTIR-Dialect.md"
+    },
+    {
+      "name": "golden-pass-list",
+      "category": "Pipeline & Infrastructure",
+      "spec_file": "docs/spec/golden-pass-list.md",
+      "chapter": "ch.02",
+      "blurb": "Compilation pass ordering for SM 7.5–8.9",
+      "maturity": "L2",
+      "reference_chapter": "ch.02.add-stages-Harness",
+      "textbook": "book-zh/ch.02.add-stages-Harness.md"
+    },
+    {
+      "name": "@kernel",
+      "category": "Pipeline & Infrastructure",
+      "spec_file": "docs/spec/python-frontend.md",
+      "chapter": "ch.01",
+      "blurb": "`@kernel` → `CodeGenerator` → TTIR pipeline",
+      "maturity": "L1",
+      "reference_chapter": "ch.01.Python-Frontend",
+      "textbook": "book-zh/ch.01.Python-Frontend.md"
+    },
+    {
+      "name": "FileCacheManager",
+      "category": "Pipeline & Infrastructure",
+      "spec_file": "docs/spec/jit-cache.md",
+      "chapter": "ch.07",
+      "blurb": "JIT dispatch + `FileCacheManager`",
+      "maturity": "L2",
+      "reference_chapter": "ch.07.JIT-And-Caching",
+      "textbook": "book-zh/ch.07.JIT-And-Caching.md"
+    }
+  ],
+  "ops": [
+    {
+      "op": "tt.int_to_ptr",
+      "dialect": "ttir",
+      "class": "TT_IntToPtrOp",
+      "td": "TritonOps.td:37",
+      "traits": "Elementwise; SameOperandsAndResultShape; SameOperandsAndResultEncoding; Pure",
+      "summary": "Cast int64 to pointer"
+    },
+    {
+      "op": "tt.ptr_to_int",
+      "dialect": "ttir",
+      "class": "TT_PtrToIntOp",
+      "td": "TritonOps.td:47",
+      "traits": "Elementwise; SameOperandsAndResultShape; SameOperandsAndResultEncoding; Pure",
+      "summary": "Cast pointer to int64"
+    },
+    {
+      "op": "tt.bitcast",
+      "dialect": "ttir",
+      "class": "TT_BitcastOp",
+      "td": "TritonOps.td:57",
+      "traits": "Elementwise; SameOperandsAndResultShape; SameOperandsAndResultEncoding; Pure",
+      "summary": "Cast between types of the same bitwidth"
+    },
+    {
+      "op": "tt.fp_to_fp",
+      "dialect": "ttir",
+      "class": "TT_FpToFpOp",
+      "td": "TritonOps.td:67",
+      "traits": "Elementwise; SameOperandsAndResultShape; SameOperandsAndResultEncoding; Pure",
+      "summary": "Floating point casting for custom types (F8) and non-default rounding"
+    },
+    {
+      "op": "tt.clampf",
+      "dialect": "ttir",
+      "class": "TT_ClampFOp",
+      "td": "TritonOps.td:82",
+      "traits": "Elementwise; SameOperandsAndResultType; Pure",
+      "summary": "Clamp operation for floating point types"
+    },
+    {
+      "op": "tt.precise_sqrt",
+      "dialect": "ttir",
+      "class": "TT_PreciseSqrtOp",
+      "td": "TritonOps.td:102",
+      "traits": "Elementwise; SameOperandsAndResultType; Pure",
+      "summary": "Precise sqrt for floating point types"
+    },
+    {
+      "op": "tt.precise_divf",
+      "dialect": "ttir",
+      "class": "TT_PreciseDivFOp",
+      "td": "TritonOps.td:114",
+      "traits": "Elementwise; SameOperandsAndResultType; Pure",
+      "summary": "Precise div for floating point types"
+    },
+    {
+      "op": "tt.mulhiui",
+      "dialect": "ttir",
+      "class": "TT_MulhiUIOp",
+      "td": "TritonOps.td:126",
+      "traits": "Elementwise; SameOperandsAndResultType; Pure",
+      "summary": "Most significant N bits of the 2N-bit product of two integers"
+    },
+    {
+      "op": "tt.addptr",
+      "dialect": "ttir",
+      "class": "TT_AddPtrOp",
+      "td": "TritonOps.td:138",
+      "traits": "Pure; Elementwise; SameOperandsAndResultShape; SameOperandsAndResultEncoding; TypesMatchWith",
+      "summary": "Add offset to pointer"
+    },
+    {
+      "op": "tt.load",
+      "dialect": "ttir",
+      "class": "TT_LoadOp",
+      "td": "TritonOps.td:148",
+      "traits": "SameLoadStoreOperandsAndResultShape; SameLoadStoreOperandsAndResultEncoding; AttrSizedOperandSegments; DeclareOpInterfaceMethods<PredicatedOpInterface>; DeclareOpInterfaceMethods<MemoryEffectsOpInterface>; DeclareOpInterfaceMethods<InferTypeOpInterface>; TypesMatchWith",
+      "summary": "Load from a pointer or tensor of pointers"
+    },
+    {
+      "op": "tt.store",
+      "dialect": "ttir",
+      "class": "TT_StoreOp",
+      "td": "TritonOps.td:192",
+      "traits": "SameLoadStoreOperandsShape; SameLoadStoreOperandsEncoding; DeclareOpInterfaceMethods<PredicatedOpInterface>; TypesMatchWith",
+      "summary": "Store through a pointer or tensor of pointers"
+    },
+    {
+      "op": "tt.atomic_rmw",
+      "dialect": "ttir",
+      "class": "TT_AtomicRMWOp",
+      "td": "TritonOps.td:230",
+      "traits": "SameOperandsAndResultShape; SameOperandsAndResultEncoding; DeclareOpInterfaceMethods<PredicatedOpInterface>; TypesMatchWith",
+      "summary": "Atomic rmw; load data at ptr, do rmw_op with val, store result to ptr"
+    },
+    {
+      "op": "tt.atomic_cas",
+      "dialect": "ttir",
+      "class": "TT_AtomicCASOp",
+      "td": "TritonOps.td:261",
+      "traits": "SameOperandsAndResultShape; SameOperandsAndResultEncoding; TypesMatchWith",
+      "summary": "Atomic cas; compare cmp with data at ptr, conditionally store val, return old"
+    },
+    {
+      "op": "tt.splat",
+      "dialect": "ttir",
+      "class": "TT_SplatOp",
+      "td": "TritonOps.td:286",
+      "traits": "Pure; SameOperandsAndResultElementType; SameOperandsAndResultEncoding",
+      "summary": "Splat"
+    },
+    {
+      "op": "tt.unsplat",
+      "dialect": "ttir",
+      "class": "TT_UnsplatOp",
+      "td": "TritonOps.td:297",
+      "traits": "Pure; DeclareOpInterfaceMethods<InferTypeOpInterface>",
+      "summary": "Convert a tensor with a single element to a scalar"
+    },
+    {
+      "op": "tt.expand_dims",
+      "dialect": "ttir",
+      "class": "TT_ExpandDimsOp",
+      "td": "TritonOps.td:306",
+      "traits": "Pure; DeclareOpInterfaceMethods<InferTypeOpInterface>; SameOperandsAndResultElementType",
+      "summary": "Expand dims"
+    },
+    {
+      "op": "tt.reshape",
+      "dialect": "ttir",
+      "class": "TT_ReshapeOp",
+      "td": "TritonOps.td:319",
+      "traits": "Pure; SameOperandsAndResultElementType",
+      "summary": "Reinterpret a tensor to a different shape, optionally allowing reorder and efficient_layout hints"
+    },
+    {
+      "op": "tt.broadcast",
+      "dialect": "ttir",
+      "class": "TT_BroadcastOp",
+      "td": "TritonOps.td:339",
+      "traits": "Pure; SameOperandsAndResultElementType; SameOperandsAndResultEncoding",
+      "summary": "Broadcast a tensor"
+    },
+    {
+      "op": "tt.cat",
+      "dialect": "ttir",
+      "class": "TT_CatOp",
+      "td": "TritonOps.td:355",
+      "traits": "NoMemoryEffect; SameTypeOperands; SameOperandsAndResultElementType",
+      "summary": "Concatenate 2 tensors"
+    },
+    {
+      "op": "tt.join",
+      "dialect": "ttir",
+      "class": "TT_JoinOp",
+      "td": "TritonOps.td:368",
+      "traits": "Pure; SameTypeOperands",
+      "summary": "Join two tensors along a new, minor dimension"
+    },
+    {
+      "op": "tt.split",
+      "dialect": "ttir",
+      "class": "TT_SplitOp",
+      "td": "TritonOps.td:386",
+      "traits": "Pure; InferTensorTypeOpWithLayoutEquivalence; TypesMatchWith",
+      "summary": "Split a tensor into two, along its last dimension"
+    },
+    {
+      "op": "tt.trans",
+      "dialect": "ttir",
+      "class": "TT_TransOp",
+      "td": "TritonOps.td:402",
+      "traits": "Pure; TransposeOpInterface; InferTensorTypeOpWithLayoutEquivalence; SameOperandsAndResultElementType",
+      "summary": "Rearrange the dimensions of a tensor"
+    },
+    {
+      "op": "tt.get_program_id",
+      "dialect": "ttir",
+      "class": "TT_GetProgramIdOp",
+      "td": "TritonOps.td:455",
+      "traits": "Pure",
+      "summary": "Get the program id for a dimension (x, y, or z)"
+    },
+    {
+      "op": "tt.get_num_programs",
+      "dialect": "ttir",
+      "class": "TT_GetNumProgramsOp",
+      "td": "TritonOps.td:468",
+      "traits": "Pure",
+      "summary": "Get the number of programs for a dimension"
+    },
+    {
+      "op": "tt.dot",
+      "dialect": "ttir",
+      "class": "TT_DotOp",
+      "td": "TritonOps.td:481",
+      "traits": "Pure; DeclareOpInterfaceMethods<InferTypeOpInterface>; DeclareOpInterfaceMethods<DotOpInterface>; TypesMatchWith",
+      "summary": "Matrix multiply d = matmul(a, b) + c with optional input precision specification"
+    },
+    {
+      "op": "tt.dot_scaled",
+      "dialect": "ttir",
+      "class": "TT_DotScaledOp",
+      "td": "TritonOps.td:517",
+      "traits": "Pure; AttrSizedOperandSegments; DeclareOpInterfaceMethods<DotOpInterface, [\"verifyDims\", \"verifyOutputDims\"]>; TypesMatchWith",
+      "summary": "Scaled matrix multiply with microscaling"
+    },
+    {
+      "op": "tt.reduce",
+      "dialect": "ttir",
+      "class": "TT_ReduceOp",
+      "td": "TritonOps.td:558",
+      "traits": "Pure; SameOperandsShape; SameOperandsEncoding; SingleBlock; DeclareOpInterfaceMethods<InferTypeOpInterface>",
+      "summary": "Reduction using generic combination algorithm"
+    },
+    {
+      "op": "tt.reduce.return",
+      "dialect": "ttir",
+      "class": "TT_ReduceReturnOp",
+      "td": "TritonOps.td:576",
+      "traits": "HasParent<\"ReduceOp\">; Pure; Terminator; ReturnLike",
+      "summary": "Terminator for reduce"
+    },
+    {
+      "op": "tt.scan",
+      "dialect": "ttir",
+      "class": "TT_ScanOp",
+      "td": "TritonOps.td:588",
+      "traits": "Pure; SameOperandsAndResultEncoding; SameOperandsAndResultShape; SingleBlock; DeclareOpInterfaceMethods<InferTypeOpInterface>",
+      "summary": "Associative scan using generic combination algorithm"
+    },
+    {
+      "op": "tt.scan.return",
+      "dialect": "ttir",
+      "class": "TT_ScanReturnOp",
+      "td": "TritonOps.td:610",
+      "traits": "HasParent<\"ScanOp\">; Pure; Terminator; ReturnLike",
+      "summary": "Terminator for scan"
+    },
+    {
+      "op": "tt.map_elementwise",
+      "dialect": "ttir",
+      "class": "TT_MapElementwiseOp",
+      "td": "TritonOps.td:621",
+      "traits": "SameOperandsAndResultEncoding; SameOperandsAndResultShape; RecursiveMemoryEffects",
+      "summary": "Map a scalar subregion over a tensor"
+    },
+    {
+      "op": "tt.map_elementwise.return",
+      "dialect": "ttir",
+      "class": "TT_MapElementwiseReturnOp",
+      "td": "TritonOps.td:632",
+      "traits": "HasParent<\"MapElementwiseOp\">; Pure; Terminator; ReturnLike",
+      "summary": "Terminator for map elementwise"
+    },
+    {
+      "op": "tt.extern_elementwise",
+      "dialect": "ttir",
+      "class": "TT_ExternElementwiseOp",
+      "td": "TritonOps.td:641",
+      "traits": "Elementwise; SameOperandsAndResultEncoding; SameVariadicOperandSize; DeclareOpInterfaceMethods<MemoryEffectsOpInterface>; ConditionallySpeculatable",
+      "summary": "Call an external function"
+    },
+    {
+      "op": "tt.make_range",
+      "dialect": "ttir",
+      "class": "TT_MakeRangeOp",
+      "td": "TritonOps.td:666",
+      "traits": "Pure",
+      "summary": "Returns 1D int32 tensor with values from start to end (exclusive)"
+    },
+    {
+      "op": "tt.elementwise_inline_asm",
+      "dialect": "ttir",
+      "class": "TT_ElementwiseInlineAsmOp",
+      "td": "TritonOps.td:687",
+      "traits": "Elementwise; SameOperandsAndResultEncoding; DeclareOpInterfaceMethods<MemoryEffectsOpInterface>; DeclareOpInterfaceMethods<ConditionallySpeculatable>",
+      "summary": "Inline assembly applying an elementwise operation to packed elements"
+    },
+    {
+      "op": "tt.histogram",
+      "dialect": "ttir",
+      "class": "TT_HistogramOp",
+      "td": "TritonOps.td:712",
+      "traits": "Pure; TypesMatchWith",
+      "summary": "Return a histogram of the inputs"
+    },
+    {
+      "op": "tt.gather",
+      "dialect": "ttir",
+      "class": "TT_GatherOp",
+      "td": "TritonOps.td:729",
+      "traits": "Pure; DeclareOpInterfaceMethods<InferTypeOpInterface>",
+      "summary": "Local gather operation"
+    },
+    {
+      "op": "tt.print",
+      "dialect": "ttir",
+      "class": "TT_PrintOp",
+      "td": "TritonOps.td:756",
+      "traits": "SameVariadicOperandSize; MemoryEffects<[MemWrite<GlobalMemory>]>",
+      "summary": "Device-side print for debugging"
+    },
+    {
+      "op": "tt.assert",
+      "dialect": "ttir",
+      "class": "TT_AssertOp",
+      "td": "TritonOps.td:768",
+      "traits": "MemoryEffects<[MemWrite<GlobalMemory>]>",
+      "summary": "Device-side assert for correctness checking"
+    },
+    {
+      "op": "tt.make_tensor_descriptor",
+      "dialect": "ttir",
+      "class": "TT_MakeTensorDescOp",
+      "td": "TritonOps.td:779",
+      "traits": "Pure; SameVariadicOperandSize",
+      "summary": "Make a tensor descriptor with meta information of parent tensor and block size"
+    },
+    {
+      "op": "tt.call",
+      "dialect": "ttir",
+      "class": "CallOp",
+      "td": "TritonOps.td:804",
+      "traits": "CallOpInterface; DeclareOpInterfaceMethods<SymbolUserOpInterface>",
+      "summary": "Direct call to a function"
+    },
+    {
+      "op": "tt.func",
+      "dialect": "ttir",
+      "class": "FuncOp",
+      "td": "TritonOps.td:867",
+      "traits": "AffineScope; AutomaticAllocationScope; CallableOpInterface; FunctionOpInterface; IsolatedFromAbove; OpAsmOpInterface; HasParent<\"ModuleOp\">",
+      "summary": "An operation with a name containing a single SSACFG region"
+    },
+    {
+      "op": "tt.return",
+      "dialect": "ttir",
+      "class": "ReturnOp",
+      "td": "TritonOps.td:931",
+      "traits": "Pure; HasParent<\"FuncOp\">; ReturnLike; Terminator",
+      "summary": "Function return operation"
+    },
+    {
+      "op": "tt.descriptor_load",
+      "dialect": "ttir",
+      "class": "TT_DescriptorLoadOp",
+      "td": "TritonOps.td:954",
+      "traits": "TT_DescriptorLoadLikeOpInterface",
+      "summary": "Load from descriptor; will be lowered to NVIDIA TMA load"
+    },
+    {
+      "op": "tt.descriptor_store",
+      "dialect": "ttir",
+      "class": "TT_DescriptorStoreOp",
+      "td": "TritonOps.td:980",
+      "traits": "TT_DescriptorStoreLikeOpInterface",
+      "summary": "Store value based on descriptor; will be lowered to NVIDIA TMA store"
+    },
+    {
+      "op": "tt.descriptor_reduce",
+      "dialect": "ttir",
+      "class": "TT_DescriptorReduceOp",
+      "td": "TritonOps.td:1001",
+      "traits": "TT_DescriptorStoreLikeOpInterface",
+      "summary": "Reducing store based on a descriptor"
+    },
+    {
+      "op": "tt.descriptor_gather",
+      "dialect": "ttir",
+      "class": "TT_DescriptorGatherOp",
+      "td": "TritonOps.td:1024",
+      "traits": "TT_DescriptorLoadLikeOpInterface",
+      "summary": "Gather multiple rows from a descriptor into a single tensor"
+    },
+    {
+      "op": "tt.descriptor_scatter",
+      "dialect": "ttir",
+      "class": "TT_DescriptorScatterOp",
+      "td": "TritonOps.td:1050",
+      "traits": "TT_DescriptorStoreLikeOpInterface",
+      "summary": "Scatter multiple rows to a descriptor from a single tensor"
+    },
+    {
+      "op": "ttg.convert_layout",
+      "dialect": "ttgir",
+      "class": "TTG_ConvertLayoutOp",
+      "td": "TritonGPUOps.td:38",
+      "traits": "SameOperandsAndResultShape; SameOperandsAndResultElementType; Pure",
+      "summary": "Convert layout"
+    },
+    {
+      "op": "ttg.async_wait",
+      "dialect": "ttgir",
+      "class": "TTG_AsyncWaitOp",
+      "td": "TritonGPUOps.td:47",
+      "traits": "MemWaitOpTrait",
+      "summary": "Ensure all specified async_copy_* operations are complete"
+    },
+    {
+      "op": "ttg.async_commit_group",
+      "dialect": "ttgir",
+      "class": "TTG_AsyncCommitGroupOp",
+      "td": "TritonGPUOps.td:68",
+      "traits": "",
+      "summary": "Commit pending async copies into a group"
+    },
+    {
+      "op": "ttg.async_copy_global_to_local",
+      "dialect": "ttgir",
+      "class": "TTG_AsyncCopyGlobalToLocalOp",
+      "td": "TritonGPUOps.td:80",
+      "traits": "AttrSizedOperandSegments; DeclareOpInterfaceMethods<PredicatedOpInterface>; OptionalTypesMatchWith",
+      "summary": "Copy data from global memory to local memory asynchronously"
+    },
+    {
+      "op": "ttg.local_alloc",
+      "dialect": "ttgir",
+      "class": "TTG_LocalAllocOp",
+      "td": "TritonGPUOps.td:117",
+      "traits": "DeclareOpInterfaceMethods<MemoryEffectsOpInterface>",
+      "summary": "Allocate tensor in shared memory"
+    },
+    {
+      "op": "ttg.local_dealloc",
+      "dialect": "ttgir",
+      "class": "TTG_LocalDeallocOp",
+      "td": "TritonGPUOps.td:156",
+      "traits": "",
+      "summary": "Dealloc buffer"
+    },
+    {
+      "op": "ttg.memdesc_index",
+      "dialect": "ttgir",
+      "class": "TTG_MemDescIndexOp",
+      "td": "TritonGPUOps.td:168",
+      "traits": "Pure; MemDescViewTrait",
+      "summary": "Take a subview of the descriptor at the given index"
+    },
+    {
+      "op": "ttg.memdesc_subslice",
+      "dialect": "ttgir",
+      "class": "TTG_MemDescSubsliceOp",
+      "td": "TritonGPUOps.td:190",
+      "traits": "Pure; MemDescViewTrait",
+      "summary": "Take a subview of the descriptor"
+    },
+    {
+      "op": "ttg.memdesc_trans",
+      "dialect": "ttgir",
+      "class": "TTG_MemDescTransOp",
+      "td": "TritonGPUOps.td:214",
+      "traits": "Pure; MemDescViewTrait; TransposeOpInterface; InferMemDescTypeOpWithLayoutEquivalence; SameOperandsAndResultElementType",
+      "summary": "Transpose the descriptor"
+    },
+    {
+      "op": "ttg.memdesc_reshape",
+      "dialect": "ttgir",
+      "class": "TTG_MemDescReshapeOp",
+      "td": "TritonGPUOps.td:240",
+      "traits": "Pure; MemDescViewTrait; SameOperandsAndResultElementType",
+      "summary": "Create a descriptor for a new shape"
+    },
+    {
+      "op": "ttg.memdesc_reinterpret",
+      "dialect": "ttgir",
+      "class": "TTG_MemDescReinterpretOp",
+      "td": "TritonGPUOps.td:269",
+      "traits": "Pure; MemDescViewTrait",
+      "summary": "Reinterpret a memory descriptor as a different type and shape"
+    },
+    {
+      "op": "ttg.local_load",
+      "dialect": "ttgir",
+      "class": "TTG_LocalLoadOp",
+      "td": "TritonGPUOps.td:286",
+      "traits": "LocalLoadTrait",
+      "summary": "Load a buffer from local memory into a distributed tensor"
+    },
+    {
+      "op": "ttg.local_store",
+      "dialect": "ttgir",
+      "class": "TTG_LocalStoreOp",
+      "td": "TritonGPUOps.td:308",
+      "traits": "",
+      "summary": "Store a distributed tensor into a buffer in local memory"
+    },
+    {
+      "op": "ttg.local_gather",
+      "dialect": "ttgir",
+      "class": "TTG_LocalGatherOp",
+      "td": "TritonGPUOps.td:321",
+      "traits": "LocalLoadTrait",
+      "summary": "Gather elements from shared memory along a specified axis"
+    },
+    {
+      "op": "ttg.local_scatter",
+      "dialect": "ttgir",
+      "class": "TTG_LocalScatterOp",
+      "td": "TritonGPUOps.td:350",
+      "traits": "",
+      "summary": "Scatter elements to shared memory along a specified axis"
+    },
+    {
+      "op": "ttg.local_atomic_scatter_rmw",
+      "dialect": "ttgir",
+      "class": "TTG_LocalAtomicScatterRMWOp",
+      "td": "TritonGPUOps.td:376",
+      "traits": "DeclareOpInterfaceMethods<InferTypeOpInterface>; TypesMatchWith; OptionalTypesMatchWith",
+      "summary": "Atomically scatter RMW elements into shared memory along a specified axis"
+    },
+    {
+      "op": "ttg.predicate_stage",
+      "dialect": "ttgir",
+      "class": "TTG_PredicateStageOp",
+      "td": "TritonGPUOps.td:406",
+      "traits": "Pure; AllTypesMatch",
+      "summary": "Pipeliner stage predicate"
+    },
+    {
+      "op": "ttg.mask",
+      "dialect": "ttgir",
+      "class": "TTG_MaskOp",
+      "td": "TritonGPUOps.td:415",
+      "traits": "SingleBlock",
+      "summary": "Mask op for pipelining"
+    },
+    {
+      "op": "ttg.mask.return",
+      "dialect": "ttgir",
+      "class": "TTG_MaskReturnOp",
+      "td": "TritonGPUOps.td:424",
+      "traits": "HasParent<\"MaskOp\">; Pure; Terminator; ReturnLike",
+      "summary": "Terminator for mask"
+    },
+    {
+      "op": "ttg.fp4_to_fp",
+      "dialect": "ttgir",
+      "class": "TTG_Fp4ToFpOp",
+      "td": "TritonGPUOps.td:431",
+      "traits": "Pure",
+      "summary": "Upcast fp4 (e2m1) to fp"
+    },
+    {
+      "op": "ttg.global_scratch_alloc",
+      "dialect": "ttgir",
+      "class": "TTG_GlobalScratchAllocOp",
+      "td": "TritonGPUOps.td:456",
+      "traits": "",
+      "summary": "Allocate a global memory buffer"
+    },
+    {
+      "op": "ttg.warp_specialize",
+      "dialect": "ttgir",
+      "class": "TTG_WarpSpecializeOp",
+      "td": "TritonGPUOps.td:479",
+      "traits": "RecursiveMemoryEffects; RecursivelySpeculatable; AsyncRegions; DeclareOpInterfaceMethods<RegionBranchOpInterface>",
+      "summary": "Asynchronously execute code on multiple warpgroups"
+    },
+    {
+      "op": "ttg.warp_specialize.partitions",
+      "dialect": "ttgir",
+      "class": "TTG_WarpSpecializePartitionsOp",
+      "td": "TritonGPUOps.td:591",
+      "traits": "IsolatedFromAbove; RecursiveMemoryEffects; RecursivelySpeculatable; Terminator; HasParent<\"WarpSpecializeOp\">; DeclareOpInterfaceMethods<RegionBranchOpInterface>",
+      "summary": "Container op for ttg.warp_specialize"
+    },
+    {
+      "op": "ttg.warp_yield",
+      "dialect": "ttgir",
+      "class": "TTG_WarpYieldOp",
+      "td": "TritonGPUOps.td:626",
+      "traits": "Pure; Terminator; ReturnLike; HasParent<\"WarpSpecializeOp\">; DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface>",
+      "summary": "Yield from the default region of ttg.warp_specialize"
+    },
+    {
+      "op": "ttg.warp_return",
+      "dialect": "ttgir",
+      "class": "TTG_WarpReturnOp",
+      "td": "TritonGPUOps.td:651",
+      "traits": "Pure; Terminator; ReturnLike; HasParent<\"WarpSpecializePartitionsOp\">",
+      "summary": "Implicit terminator from partition regions"
+    },
+    {
+      "op": "ttg.barrier",
+      "dialect": "ttgir",
+      "class": "TTG_BarrierOp",
+      "td": "TritonGPUOps.td:667",
+      "traits": "",
+      "summary": "Synchronizes execution and reads/writes to the selected address spaces"
+    },
+    {
+      "op": "ttg.warp_id",
+      "dialect": "ttgir",
+      "class": "TTG_WarpIdOp",
+      "td": "TritonGPUOps.td:719",
+      "traits": "Pure",
+      "summary": "Return the GPU warp ID"
+    }
+  ],
+  "encodings": [
+    {
+      "encoding": "BlockedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:550",
+      "parameters": "sizePerThread:ArrayRef<unsigned>; threadsPerWarp:ArrayRef<unsigned>; warpsPerCTA:ArrayRef<unsigned>; order:ArrayRef<unsigned>; CGALayout:CGAEncodingAttr",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Each warp owns a contiguous portion of the target tensor — **ch.09 core**",
+      "in_slice": true
+    },
+    {
+      "encoding": "SliceEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:1064",
+      "parameters": "dim:unsigned; parent:DistributedEncodingTrait",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Squeezes the given dimension in the parent layout",
+      "in_slice": false
+    },
+    {
+      "encoding": "NvidiaMmaEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:1154",
+      "parameters": "versionMajor:unsigned; versionMinor:unsigned; warpsPerCTA:ArrayRef<unsigned>; CGALayout:CGAEncodingAttr; instrShape:ArrayRef<unsigned>",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Encoding for tensors produced by NVIDIA tensor cores — **ch.10 core**",
+      "in_slice": true
+    },
+    {
+      "encoding": "AMDMfmaEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:943",
+      "parameters": "version:unsigned; warpsPerCTA:ArrayRef<unsigned>; instrShape:ArrayRef<unsigned>; isTransposed:bool; CGALayout:CGAEncodingAttr; tilesPerWarp:ArrayRef<unsigned>; elementBitWidth:unsigned",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "**OUT OF SLICE — AMD CDNA only**",
+      "in_slice": false
+    },
+    {
+      "encoding": "AMDWmmaEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:1017",
+      "parameters": "version:unsigned; ctaLayout:LinearLayout; isTransposed:bool; CGALayout:CGAEncodingAttr; instrShape:ArrayRef<unsigned>",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "**OUT OF SLICE — AMD RDNA only**",
+      "in_slice": false
+    },
+    {
+      "encoding": "DotOperandEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:1084",
+      "parameters": "opIdx:unsigned; parent:Attribute; kWidth:unsigned (optional)",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Operand layout for dot operations — **ch.10 core**",
+      "in_slice": true
+    },
+    {
+      "encoding": "LinearEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:886",
+      "parameters": "linearLayout:LinearLayout",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Encoding backed by LinearLayout with register/lane/warp/block bases — **ch.08 core**",
+      "in_slice": true
+    },
+    {
+      "encoding": "SwizzledSharedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:28",
+      "parameters": "vec:unsigned; perPhase:unsigned; maxPhase:unsigned; order:ArrayRef<unsigned>; CGALayout:CGAEncodingAttr",
+      "trait": "SharedEncodingTrait",
+      "purpose": "Shared memory layout with bank-conflict avoidance via XOR swizzling — **ch.11 core**",
+      "in_slice": true
+    },
+    {
+      "encoding": "NVMMASharedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:755",
+      "parameters": "swizzlingByteWidth:unsigned; transposed:bool; elementBitWidth:unsigned; fp4Padded:bool; CGALayout:CGAEncodingAttr",
+      "trait": "SharedEncodingTrait",
+      "purpose": "**OUT OF SLICE — MMAv3/v5 (Hopper+) only**",
+      "in_slice": false
+    },
+    {
+      "encoding": "PaddedSharedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:215",
+      "parameters": "intervals:ArrayRef<unsigned>; paddings:ArrayRef<unsigned>; linearComponent:LinearLayout",
+      "trait": "SharedEncodingTrait",
+      "purpose": "OUT OF SLICE (advanced shared memory)",
+      "in_slice": false
+    },
+    {
+      "encoding": "CGAEncodingAttr",
+      "td": "CGAEncodingAttr.td:24",
+      "parameters": "linearLayout:LinearLayout",
+      "trait": "(none)",
+      "purpose": "Describes how blocks (CTAs) in a CGA map onto logical tensor dimensions — substrate for ch.05",
+      "in_slice": true
+    },
+    {
+      "encoding": "GenericLinearEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:919",
+      "parameters": "linearLayout:LinearLayout",
+      "trait": "DistributedEncodingTrait",
+      "purpose": "Linear layout encoding with relaxed constraints (allows swizzled warps)",
+      "in_slice": false
+    },
+    {
+      "encoding": "SharedLinearEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:724",
+      "parameters": "linearLayout:LinearLayout; layoutAlignment:unsigned",
+      "trait": "SharedEncodingTrait",
+      "purpose": "Linear shared encodings mirroring LinearEncodingAttr for shared memory",
+      "in_slice": false
+    },
+    {
+      "encoding": "PartitionedSharedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:379",
+      "parameters": "numPartitions:unsigned; numGroups:unsigned; partitionDim:unsigned; partitionLayout:SharedEncodingTrait",
+      "trait": "SharedEncodingTrait",
+      "purpose": "OUT OF SLICE (multi-buffer partitioning)",
+      "in_slice": false
+    },
+    {
+      "encoding": "AMDRotatingSharedEncodingAttr",
+      "td": "TritonGPUAttrDefs.td:666",
+      "parameters": "vec:unsigned; perPhase:unsigned; maxPhase:unsigned; order:ArrayRef<unsigned>; CGALayout:CGAEncodingAttr",
+      "trait": "SharedEncodingTrait",
+      "purpose": "**OUT OF SLICE — AMD RDNA only**",
+      "in_slice": false
+    }
+  ]
+}

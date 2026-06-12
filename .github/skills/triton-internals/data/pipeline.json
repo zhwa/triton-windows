@@ -1,0 +1,2343 @@
+{
+  "generated_from": "D:\\code-dive\\triton-ppd",
+  "generated_at": "2026-06-12T22:51:34Z",
+  "note": "Self-contained Triton lowering-pipeline dissection index, distilled from triton-ppd. Regenerate with generate_pipeline.py.",
+  "stages": [
+    {
+      "name": "make_ttir",
+      "backend_method": "CUDABackend.make_ttir",
+      "source": "third_party/nvidia/backend/compiler.py",
+      "snapshot_lines": [
+        217,
+        226
+      ],
+      "pass_count": 8,
+      "passes": [
+        "add_inliner",
+        "add_rewrite_tensor_descriptor_to_pointer",
+        "add_canonicalizer",
+        "add_combine",
+        "add_reorder_broadcast",
+        "add_cse",
+        "add_symbol_dce",
+        "add_loop_unroll"
+      ]
+    },
+    {
+      "name": "make_ttgir",
+      "backend_method": "CUDABackend.make_ttgir",
+      "source": "third_party/nvidia/backend/compiler.py",
+      "snapshot_lines": [
+        228,
+        305
+      ],
+      "pass_count": 33,
+      "passes": [
+        "add_convert_to_ttgpuir",
+        "add_coalesce",
+        "add_f32_dot_tc",
+        "add_plan_cta",
+        "add_remove_layout_conversions",
+        "add_optimize_thread_locality",
+        "add_accelerate_matmul",
+        "add_remove_layout_conversions",
+        "add_optimize_dot_operands",
+        "add_optimize_descriptor_encoding",
+        "add_loop_aware_cse",
+        "add_fuse_nested_loops",
+        "add_canonicalizer",
+        "add_triton_licm",
+        "add_combine_tensor_select_and_if",
+        "add_assign_latencies",
+        "add_schedule_loops",
+        "add_pipeline",
+        "add_canonicalizer",
+        "add_loop_aware_cse",
+        "add_prefetch",
+        "add_optimize_dot_operands",
+        "add_coalesce_async_copy",
+        "add_optimize_tmem_layouts",
+        "add_remove_layout_conversions",
+        "add_reduce_data_duplication",
+        "add_reorder_instructions",
+        "add_loop_aware_cse",
+        "add_symbol_dce",
+        "add_lower_mma",
+        "add_sccp",
+        "add_cse",
+        "add_canonicalizer"
+      ]
+    },
+    {
+      "name": "make_llir",
+      "backend_method": "CUDABackend.make_llir",
+      "source": "third_party/nvidia/backend/compiler.py",
+      "snapshot_lines": null,
+      "pass_count": 11,
+      "passes": [
+        "add_combine_tensor_select_and_if",
+        "add_allocate_warp_groups",
+        "add_scf_to_cf",
+        "add_allocate_shared_memory_nv",
+        "add_allocate_tensor_memory",
+        "add_to_llvmir",
+        "add_canonicalize_llvm_ir",
+        "add_cse",
+        "add_warp_specialize_to_llvm",
+        "add_nvgpu_to_llvm",
+        "add_nvvm_to_llvm"
+      ]
+    },
+    {
+      "name": "make_ptx",
+      "backend_method": "CUDABackend.make_ptx",
+      "source": "third_party/nvidia/backend/compiler.py",
+      "snapshot_lines": null,
+      "pass_count": 0,
+      "passes": []
+    },
+    {
+      "name": "make_cubin",
+      "backend_method": "CUDABackend.make_cubin",
+      "source": "third_party/nvidia/backend/compiler.py",
+      "snapshot_lines": null,
+      "pass_count": 0,
+      "passes": []
+    }
+  ],
+  "passes": [
+    {
+      "name": "add_inliner",
+      "stage": "make_ttir",
+      "python_binding": "passes.common.add_inliner",
+      "purpose": "inline helper JIT functions",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_rewrite_tensor_descriptor_to_pointer",
+      "stage": "make_ttir",
+      "python_binding": "passes.ttir.add_rewrite_tensor_descriptor_to_pointer",
+      "purpose": "drop descriptors to raw pointers",
+      "sm": "SM < 90",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_canonicalizer",
+      "stage": "make_ttir",
+      "python_binding": "passes.common.add_canonicalizer",
+      "purpose": "fold trivial IR patterns",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_combine",
+      "stage": "make_ttir",
+      "python_binding": "passes.ttir.add_combine",
+      "purpose": "apply DRR algebraic rewrites",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_reorder_broadcast",
+      "stage": "make_ttir",
+      "python_binding": "passes.ttir.add_reorder_broadcast",
+      "purpose": "move broadcasts to cheaper positions",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_cse",
+      "stage": "make_ttir",
+      "python_binding": "passes.common.add_cse",
+      "purpose": "remove duplicate computations",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_symbol_dce",
+      "stage": "make_ttir",
+      "python_binding": "passes.common.add_symbol_dce",
+      "purpose": "erase dead symbols",
+      "sm": "all SMs",
+      "chapter": "ch.01",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_loop_unroll",
+      "stage": "make_ttir",
+      "python_binding": "passes.ttir.add_loop_unroll",
+      "purpose": "expose static loop structure",
+      "sm": "all SMs",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_convert_to_ttgpuir",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttir.add_convert_to_ttgpuir",
+      "purpose": "TTIR → TTGIR bridge",
+      "sm": "all",
+      "chapter": "ch.06",
+      "runs": 1,
+      "cpp_file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "key_functions": [
+        "GenericOpPattern<Op>",
+        "ArithConstantPattern",
+        "TritonExpandDimsPattern",
+        "TritonDotPattern",
+        "TritonCatPattern",
+        "TritonJoinOpPattern",
+        "TritonSplitOpPattern",
+        "TritonTransPattern",
+        "TritonBroadcastPattern",
+        "TritonReducePattern",
+        "TritonScanPattern",
+        "TritonMapElementwisePattern",
+        "SCFForPattern",
+        "SCFIfPattern",
+        "SCFWhilePattern",
+        "SCFConditionPattern",
+        "CFBranchPattern",
+        "CFCondBranchPattern",
+        "addNamedAttrs",
+        "populateArithPatternsAndLegality",
+        "populateMathPatternsAndLegality",
+        "populateTritonPatterns",
+        "populateSCFPatterns",
+        "(CF patterns registered inline)"
+      ]
+    },
+    {
+      "name": "add_coalesce",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_coalesce",
+      "purpose": "widen memory access layout",
+      "sm": "all",
+      "chapter": "ch.12",
+      "runs": 1,
+      "cpp_file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+      "key_functions": [
+        "TritonGPUCoalesce",
+        "CoalescePass",
+        "pickDescriptorLoadStoreLayout (single-arg)",
+        "pickDescriptorLoadStoreLayout (module-arg)"
+      ]
+    },
+    {
+      "name": "add_f32_dot_tc",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_f32_dot_tc",
+      "purpose": "map eligible f32 dot to tensor-core form",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_plan_cta",
+      "stage": "make_ttgir",
+      "python_binding": null,
+      "purpose": "assign CTA-level execution shape",
+      "sm": "NVIDIA",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_remove_layout_conversions",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_remove_layout_conversions",
+      "purpose": "delete first wave of no-op converts",
+      "sm": "all",
+      "chapter": "ch.13",
+      "runs": 3,
+      "cpp_file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "key_functions": [
+        "LayoutInfo (inside LayoutPropagation)",
+        "LayoutPropagation",
+        "LayoutRematerialization",
+        "isLayoutAnchor",
+        "LayoutPropagation::initAnchorLayout",
+        "LayoutPropagation::propagateToUsers",
+        "LayoutPropagation::propagateLayout",
+        "LayoutPropagation::resolveConflicts",
+        "LayoutPropagation::rewrite",
+        "LayoutPropagation::rewriteRegion",
+        "LayoutPropagation::getValueAs",
+        "LayoutPropagation::rewriteOp",
+        "LayoutRematerialization::backwardRematerialization",
+        "LayoutRematerialization::hoistConvertOnTopOfExtOrBroadcast",
+        "LayoutRematerialization::hoistConvertIntoConditionals",
+        "canBeRemat",
+        "isExpensiveMathOp",
+        "getByteCount",
+        "getConvertCost",
+        "isRematBeneficial",
+        "reduceToScalar",
+        "LayoutRematerialization::rewriteSlice"
+      ]
+    },
+    {
+      "name": "add_optimize_thread_locality",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_optimize_thread_locality",
+      "purpose": "improve per-thread locality",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_accelerate_matmul",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_accelerate_matmul",
+      "purpose": "install MMA-friendly encodings",
+      "sm": "all",
+      "chapter": "ch.15a",
+      "runs": 1,
+      "cpp_file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "key_functions": [
+        "BlockedToMMA",
+        "BlockedToMMAv5",
+        "ScaledBlockedToMMA",
+        "TritonGPUAccelerateMatmulPass",
+        "getMMAVersionSafe",
+        "warpsPerTileV2",
+        "warpsPerTileV3",
+        "createMMAEncodingForDot",
+        "convertDotOperandForMMA",
+        "getSharedMemoryMMAOperand",
+        "promoteOperand",
+        "decomposeMixedModeDotOp",
+        "BlockedToMMA::matchAndRewrite"
+      ]
+    },
+    {
+      "name": "add_optimize_dot_operands",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_optimize_dot_operands",
+      "purpose": "normalize dot operands for MMA",
+      "sm": "all",
+      "chapter": "ch.15b",
+      "runs": 2,
+      "cpp_file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "key_functions": [
+        "SwizzleShmemConvert",
+        "FuseTransMMAV3Plus",
+        "ReshapeMemDesc",
+        "RewriteMmaOperandViewsToMemDescForDotOp",
+        "SwizzleShmemConvert::matchAndRewrite",
+        "FuseTransMMAV3Plus::matchAndRewrite",
+        "ReshapeMemDesc::matchAndRewrite",
+        "RewriteMmaOperandViewsToMemDescForDotOp::matchAndRewrite",
+        "RewriteMmaOperandViewsToMemDescForDotOp::rewriteOperand"
+      ]
+    },
+    {
+      "name": "add_optimize_descriptor_encoding",
+      "stage": "make_ttgir",
+      "python_binding": null,
+      "purpose": "tighten descriptor layout",
+      "sm": "NVIDIA",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_loop_aware_cse",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttir.add_loop_aware_cse",
+      "purpose": "CSE without breaking loop structure",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 3,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_fuse_nested_loops",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_fuse_nested_loops",
+      "purpose": "collapse nest structure before scheduling",
+      "sm": "SM 8.x",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_canonicalizer",
+      "stage": "make_ttgir",
+      "python_binding": "passes.common.add_canonicalizer",
+      "purpose": "re-normalize after fusion",
+      "sm": "SM 8.x",
+      "chapter": "ch.02",
+      "runs": 3,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_triton_licm",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttir.add_triton_licm",
+      "purpose": "hoist loop invariants",
+      "sm": "SM 8.x",
+      "chapter": "ch.14",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_combine_tensor_select_and_if",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_combine_tensor_select_and_if",
+      "purpose": "simplify tensor control flow",
+      "sm": "SM 8.x",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_assign_latencies",
+      "stage": "make_ttgir",
+      "python_binding": null,
+      "purpose": "annotate staged pipeline latencies",
+      "sm": "SM 8.x",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_schedule_loops",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_schedule_loops",
+      "purpose": "choose producer/consumer order",
+      "sm": "SM 8.x",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_pipeline",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_pipeline",
+      "purpose": "materialize async pipeline structure",
+      "sm": "SM 8.x",
+      "chapter": "ch.14 baseline",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_prefetch",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_prefetch",
+      "purpose": "prefetch for Ampere async-copy path",
+      "sm": "SM 8 only",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_coalesce_async_copy",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_coalesce_async_copy",
+      "purpose": "merge async-copy traffic",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_optimize_tmem_layouts",
+      "stage": "make_ttgir",
+      "python_binding": null,
+      "purpose": "refine tensor-memory layout choices",
+      "sm": "listed in reference",
+      "chapter": "out of slice",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_reduce_data_duplication",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_reduce_data_duplication",
+      "purpose": "shrink replicated values",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_reorder_instructions",
+      "stage": "make_ttgir",
+      "python_binding": "passes.ttgpuir.add_reorder_instructions",
+      "purpose": "improve issue order",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_symbol_dce",
+      "stage": "make_ttgir",
+      "python_binding": "passes.common.add_symbol_dce",
+      "purpose": "erase dead helpers after scheduling",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_lower_mma",
+      "stage": "make_ttgir",
+      "python_binding": null,
+      "purpose": "lower abstract MMA ops to target form",
+      "sm": "NVIDIA",
+      "chapter": "ch.15a",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_sccp",
+      "stage": "make_ttgir",
+      "python_binding": "passes.common.add_sccp",
+      "purpose": "propagate lattice constants",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_cse",
+      "stage": "make_ttgir",
+      "python_binding": "passes.common.add_cse",
+      "purpose": "final common-subexpression cleanup",
+      "sm": "all",
+      "chapter": "ch.02",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_combine_tensor_select_and_if",
+      "stage": "make_llir",
+      "python_binding": "passes.ttgpuir.add_combine_tensor_select_and_if",
+      "purpose": "simplify tensor conditionals",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_allocate_warp_groups",
+      "stage": "make_llir",
+      "python_binding": "passes.ttgpuir.add_allocate_warp_groups",
+      "purpose": "reserve warp-group resources",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_scf_to_cf",
+      "stage": "make_llir",
+      "python_binding": "passes.convert.add_scf_to_cf",
+      "purpose": "lower structured control flow",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_allocate_shared_memory_nv",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "materialize shared-memory buffers",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_allocate_tensor_memory",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "assign tensor-memory storage",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_to_llvmir",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "convert TritonGPU ops to LLVM dialect",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "key_functions": [
+        "mmaVersionToInstrShape",
+        "getOrderFromContiguity",
+        "getMemAccessPtr",
+        "getElementBitWidth",
+        "getNumElementsPerThread",
+        "isView",
+        "isNoop",
+        "inferSrcEncoding (generic)",
+        "inferDstEncoding (generic)",
+        "isExpensiveLoadOrStore",
+        "canUseResultEncoding",
+        "getConvertBackwardSlice",
+        "replaceForOpWithNewSignature",
+        "replaceWhileOpWithNewSignature",
+        "replaceIfOpWithNewSignature",
+        "isSingleValue",
+        "swizzleDotOperandLike",
+        "getSharedEncIfAllUsersAreDotEnc",
+        "delinearize (3 overloads)",
+        "linearize (2 overloads)",
+        "cloneWithInferType",
+        "isPureUnaryInlineAsm",
+        "LocalMemOpTile",
+        "SharedMemoryObject",
+        "getSrcDstTiles",
+        "emitIndices",
+        "applyLinearLayout",
+        "lowerLdSt",
+        "lowerLocalLdSt",
+        "lowerLdStShared",
+        "computeLocalPtrs",
+        "matrixVectorProd",
+        "getThreadId",
+        "getLaneAndWarpId",
+        "getLaneId",
+        "maybeAnd",
+        "unpackLLElements",
+        "packLLElements",
+        "unpackLLVector",
+        "packLLVector",
+        "getFunctionType",
+        "appendOrGetExternFuncOp",
+        "matchAtomicOp",
+        "getMemoryOrdering",
+        "emitOffsetForLayout",
+        "getFreeVariableMasks",
+        "getAllFreeVarMasks"
+      ]
+    },
+    {
+      "name": "add_canonicalize_llvm_ir",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "normalize LLVM dialect IR",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_cse",
+      "stage": "make_llir",
+      "python_binding": "passes.common.add_cse",
+      "purpose": "delete redundant LLVM dialect ops",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_warp_specialize_to_llvm",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "lower warp-specialized ops",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_nvgpu_to_llvm",
+      "stage": "make_llir",
+      "python_binding": null,
+      "purpose": "lower NVGPU dialect",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    },
+    {
+      "name": "add_nvvm_to_llvm",
+      "stage": "make_llir",
+      "python_binding": "passes.convert.add_nvvm_to_llvm",
+      "purpose": "lower NVVM dialect",
+      "sm": "",
+      "chapter": "",
+      "runs": 1,
+      "cpp_file": null,
+      "key_functions": []
+    }
+  ],
+  "functions": [
+    {
+      "name": "toLinearLayout (RankedTensorType)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 57,
+      "signature": "LinearLayout toLinearLayout(RankedTensorType type);",
+      "core": false,
+      "purpose": "Convert ranked tensor type to LinearLayout mapping"
+    },
+    {
+      "name": "toLinearLayout (MemDescType)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 58,
+      "signature": "LinearLayout toLinearLayout(MemDescType type);",
+      "core": false,
+      "purpose": "Convert memory descriptor type to LinearLayout"
+    },
+    {
+      "name": "toLinearLayout (TensorOrMemDesc)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 59,
+      "signature": "LinearLayout toLinearLayout(TensorOrMemDesc type);",
+      "core": false,
+      "purpose": "Unified overload for tensor or memdesc"
+    },
+    {
+      "name": "toLinearLayout (generic 4-arg)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 60,
+      "signature": "LinearLayout toLinearLayout(ArrayRef<int64_t> shape, Attribute layout);",
+      "core": false,
+      "purpose": "Generic unsafe overload requiring allocShape for shared encodings"
+    },
+    {
+      "name": "paddedLinearLayout",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 64,
+      "signature": "LinearLayout paddedLinearLayout(MemDescType type);",
+      "core": false,
+      "purpose": "Extract linear component of padded shared encoding"
+    },
+    {
+      "name": "nvmmaSharedToLinearLayout (basic)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 73,
+      "signature": "LinearLayout nvmmaSharedToLinearLayout(ArrayRef<int64_t> shape, NVMMASharedEncodingAttr shared, TMAMode mode, bool disableSwizzle);",
+      "core": false,
+      "purpose": "NVIDIA MMA shared encoding → LinearLayout"
+    },
+    {
+      "name": "nvmmaSharedToLinearLayout (with errors)",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 79,
+      "signature": "FailureOr<LinearLayout> nvmmaSharedToLinearLayout(..., bool emitErrors);",
+      "core": false,
+      "purpose": "Same with error reporting"
+    },
+    {
+      "name": "getLayoutWithinBlock",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 85,
+      "signature": "LinearLayout getLayoutWithinBlock(const LinearLayout &layout);",
+      "core": false,
+      "purpose": "Remove \"block\" dimension from layout"
+    },
+    {
+      "name": "combineCtaCgaWithShape",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 92,
+      "signature": "LinearLayout combineCtaCgaWithShape(LinearLayout ctaLayout, CGAEncodingAttr cgaLayoutAttr, ArrayRef<int64_t> shape);",
+      "core": false,
+      "purpose": "Merge CTA + CGA layouts with tensor shape constraints"
+    },
+    {
+      "name": "chooseWmmaCTALinearLayout",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 99,
+      "signature": "LinearLayout chooseWmmaCTALinearLayout(MLIRContext *ctx, unsigned rank, ArrayRef<unsigned> warpsPerCTA, ArrayRef<unsigned> tilesPerWarp);",
+      "core": false,
+      "purpose": "WMMA thread-to-element mapping for CTA"
+    },
+    {
+      "name": "chooseShemLayoutForRegToRegConversion",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 103,
+      "signature": "LinearLayout chooseShemLayoutForRegToRegConversion(MLIRContext *ctx, ArrayRef<unsigned> tensorShape, ArrayRef<unsigned> repShape, ArrayRef<unsigned> order);",
+      "core": false,
+      "purpose": "Shared memory layout for register-to-register conversions"
+    },
+    {
+      "name": "chooseDsReadTrLayout",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 111,
+      "signature": "std::optional<LinearLayout> chooseDsReadTrLayout(..., unsigned instBitWidth, unsigned numLanesInShuffleGroup);",
+      "core": false,
+      "purpose": "AMD GPU ds_read_tr transpose instruction layout"
+    },
+    {
+      "name": "nvidiaMmaTile",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 136,
+      "signature": "LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape, unsigned kWidth, ArrayRef<unsigned> order, ArrayRef<unsigned> repOrder);",
+      "core": false,
+      "purpose": "NVIDIA MMA tile linear layout"
+    },
+    {
+      "name": "getCoreMatrixLinearLayout",
+      "file": "include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h",
+      "snapshot_line": 146,
+      "signature": "LinearLayout getCoreMatrixLinearLayout(NVMMASharedEncodingAttr shared, bool disableSwizzle);",
+      "core": false,
+      "purpose": "Core matrix (8×8 tile) linear layout for NVMMA shared (Hopper)"
+    },
+    {
+      "name": "getCoreMatrixLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 83,
+      "signature": "LinearLayout getCoreMatrixLinearLayout(NVMMASharedEncodingAttr shared, bool disableSwizzle)",
+      "core": false,
+      "purpose": "Core 8×8 NVMMA tile with optional swizzle disable"
+    },
+    {
+      "name": "nvmmaSharedToLinearLayout (basic)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 153,
+      "signature": "LinearLayout nvmmaSharedToLinearLayout(...)",
+      "core": false,
+      "purpose": "NVMMA shared → LinearLayout"
+    },
+    {
+      "name": "nvmmaSharedToLinearLayout (with errors)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 164,
+      "signature": "FailureOr<LinearLayout> nvmmaSharedToLinearLayout(..., bool emitErrors)",
+      "core": false,
+      "purpose": "Fallible NVMMA conversion with diagnostics"
+    },
+    {
+      "name": "BlockedEncodingAttr::toLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 967,
+      "signature": "LinearLayout BlockedEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const",
+      "core": true,
+      "purpose": "Core ch.08: blocked encoding (register/lane/warp)"
+    },
+    {
+      "name": "fmaDotToLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 977,
+      "signature": "LinearLayout fmaDotToLinearLayout(DotOperandEncodingAttr operandLayout, ArrayRef<int64_t> shape)",
+      "core": false,
+      "purpose": "FMA (Blocked parent) dot operand layout"
+    },
+    {
+      "name": "nvidiaMmaTile",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1013,
+      "signature": "LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape, unsigned kWidth, ArrayRef<unsigned> order, ArrayRef<unsigned> repOrder)",
+      "core": false,
+      "purpose": "NVIDIA MMA tile base structure"
+    },
+    {
+      "name": "NvidiaMmaEncodingAttr::toLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1066,
+      "signature": "LinearLayout NvidiaMmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const",
+      "core": true,
+      "purpose": "Core ch.10 (referenced by ch.08): full NVIDIA MMA layout"
+    },
+    {
+      "name": "nvidiaDotToLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1117,
+      "signature": "LinearLayout nvidiaDotToLinearLayout(ArrayRef<int64_t> shape, DotOperandEncodingAttr dot)",
+      "core": false,
+      "purpose": "NVIDIA dot operand layout"
+    },
+    {
+      "name": "DotOperandEncodingAttr::toLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1154,
+      "signature": "LinearLayout DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const",
+      "core": true,
+      "purpose": "Core ch.10: dispatch to parent-specific dot layout"
+    },
+    {
+      "name": "SliceEncodingAttr::toLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1168,
+      "signature": "LinearLayout SliceEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const",
+      "core": false,
+      "purpose": "Slice layout (remove dimension from parent)"
+    },
+    {
+      "name": "TritonGPUDialect::toLinearLayout (dispatcher)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1351,
+      "signature": "LinearLayout TritonGPUDialect::toLinearLayout(ArrayRef<int64_t> shape, Attribute layout)",
+      "core": true,
+      "purpose": "Core ch.08: central dispatch + cache"
+    },
+    {
+      "name": "toLinearLayout (RankedTensorType)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1398,
+      "signature": "LinearLayout toLinearLayout(RankedTensorType type)",
+      "core": false,
+      "purpose": "Wrapper"
+    },
+    {
+      "name": "toLinearLayout (MemDescType)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1403,
+      "signature": "(MemDesc wrapper)",
+      "core": false,
+      "purpose": "Wrapper"
+    },
+    {
+      "name": "toLinearLayout (TensorOrMemDesc)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1410,
+      "signature": "(union wrapper)",
+      "core": false,
+      "purpose": "Wrapper"
+    },
+    {
+      "name": "toLinearLayout (generic)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1418,
+      "signature": "(forwarding)",
+      "core": false,
+      "purpose": "Wrapper"
+    },
+    {
+      "name": "paddedLinearLayout (two overloads)",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1424,
+      "signature": "(padded encoding)",
+      "core": false,
+      "purpose": "Wrapper"
+    },
+    {
+      "name": "getLayoutWithinBlock",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1439,
+      "signature": "LinearLayout getLayoutWithinBlock(...)",
+      "core": false,
+      "purpose": "Remove block dimension"
+    },
+    {
+      "name": "combineCtaCgaWithShape",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1452,
+      "signature": "LinearLayout combineCtaCgaWithShape(LinearLayout ctaLayout, CGAEncodingAttr cgaLayoutAttr, ArrayRef<int64_t> shape)",
+      "core": true,
+      "purpose": "Core ch.08: merge CTA/CGA with shape validation"
+    },
+    {
+      "name": "chooseShemLayoutForRegToRegConversion",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 1506,
+      "signature": "(shared mem reg-to-reg)",
+      "core": false,
+      "purpose": "Mostly needed for ch.13/14"
+    },
+    {
+      "name": "permuteDimNames",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 39,
+      "signature": "SmallVector<StringAttr> permuteDimNames(const SmallVector<StringAttr> &names, const SmallVector<unsigned> &order)",
+      "core": false,
+      "purpose": "Permute output dim names by order"
+    },
+    {
+      "name": "getDefaultMmaOrder",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 34,
+      "signature": "SmallVector<unsigned> getDefaultMmaOrder(MmaEncodingTrait layout)",
+      "core": false,
+      "purpose": "Standard row-major order for MMA"
+    },
+    {
+      "name": "swizzledSharedToLinearLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 49,
+      "signature": "LinearLayout swizzledSharedToLinearLayout(ArrayRef<int64_t> shape, SwizzledSharedEncodingAttr shared)",
+      "core": true,
+      "purpose": "Core ch.11: swizzled shared mem (row/col bases + phase)"
+    },
+    {
+      "name": "broadcastedDotOperandLayout",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 173,
+      "signature": "LinearLayout broadcastedDotOperandLayout(MLIRContext *ctx, ArrayRef<unsigned> shape, ArrayRef<unsigned> order, unsigned kDim, StringAttr inDimName)",
+      "core": false,
+      "purpose": "Broadcast along K dim for dot ops"
+    },
+    {
+      "name": "projectAwayOutDim",
+      "file": "lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp",
+      "snapshot_line": 957,
+      "signature": "static LinearLayout projectAwayOutDim(const LinearLayout &layout, StringAttr dim)",
+      "core": false,
+      "purpose": "Zero out output dimension bases"
+    },
+    {
+      "name": "TritonGPUCoalesce",
+      "file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+      "snapshot_line": 21,
+      "signature": "GEN_PASS_DEF_TRITONGPUCOALESCE",
+      "core": false,
+      "purpose": "Generated pass definition from `Passes.h.inc`"
+    },
+    {
+      "name": "CoalescePass",
+      "file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+      "snapshot_line": 31,
+      "signature": "struct CoalescePass : public impl::TritonGPUCoalesceBase<CoalescePass>",
+      "core": false,
+      "purpose": "Main pass implementing memory coalescing heuristic"
+    },
+    {
+      "name": "pickDescriptorLoadStoreLayout (single-arg)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+      "snapshot_line": 32,
+      "signature": "static Attribute pickDescriptorLoadStoreLayout(int numWarps, int threadsPerWarp, RankedTensorType type)",
+      "core": false,
+      "purpose": "Compute layout for descriptor load/store"
+    },
+    {
+      "name": "pickDescriptorLoadStoreLayout (module-arg)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+      "snapshot_line": 49,
+      "signature": "static void pickDescriptorLoadStoreLayout(ModuleOp moduleOp, llvm::MapVector<Operation *, Attribute> &layoutMap)",
+      "core": false,
+      "purpose": "Walk module, pick layouts for all descriptor ops"
+    },
+    {
+      "name": "GenericOpPattern<Op>",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 31,
+      "signature": "template <class Op> struct GenericOpPattern : public OpConversionPattern<Op>",
+      "core": false,
+      "purpose": "Generic pattern forwarding operand types + attrs"
+    },
+    {
+      "name": "ArithConstantPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 44,
+      "signature": "class ArithConstantPattern : public OpConversionPattern<arith::ConstantOp>",
+      "core": false,
+      "purpose": "Constant op with encoding addition (dense attr reshape)"
+    },
+    {
+      "name": "TritonExpandDimsPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 155,
+      "signature": "struct TritonExpandDimsPattern : public OpConversionPattern<triton::ExpandDimsOp>",
+      "core": false,
+      "purpose": "Expand dims with blocked encoding axis insertion"
+    },
+    {
+      "name": "TritonDotPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 197,
+      "signature": "struct TritonDotPattern : public OpConversionPattern<triton::DotOp>",
+      "core": true,
+      "purpose": "Core: dot conversion: assign blocked encoding, operand conversion"
+    },
+    {
+      "name": "TritonCatPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 253,
+      "signature": "(cat with pow-2 sizePerThread)",
+      "core": false,
+      "purpose": "Cat op with next-power-of-2 adjustment"
+    },
+    {
+      "name": "TritonJoinOpPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 292,
+      "signature": "(join via type inference)",
+      "core": false,
+      "purpose": "Join op"
+    },
+    {
+      "name": "TritonSplitOpPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 307,
+      "signature": "(split with legal src enc)",
+      "core": false,
+      "purpose": "Split with validation"
+    },
+    {
+      "name": "TritonTransPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 362,
+      "signature": "(transpose)",
+      "core": false,
+      "purpose": "Transpose with source encoding preservation"
+    },
+    {
+      "name": "TritonBroadcastPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 378,
+      "signature": "(broadcast)",
+      "core": false,
+      "purpose": "Broadcast with source encoding reuse"
+    },
+    {
+      "name": "TritonReducePattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 395,
+      "signature": "(reduce w/ region clone)",
+      "core": false,
+      "purpose": "Reduce with region cloning"
+    },
+    {
+      "name": "TritonScanPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 412,
+      "signature": "(scan w/ region clone)",
+      "core": false,
+      "purpose": "Scan with region cloning"
+    },
+    {
+      "name": "TritonMapElementwisePattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 429,
+      "signature": "(map elementwise w/ region)",
+      "core": false,
+      "purpose": "Map elementwise with result type conversion"
+    },
+    {
+      "name": "SCFForPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 489,
+      "signature": "(scf.for)",
+      "core": false,
+      "purpose": "SCF for loop: clone, convert region types"
+    },
+    {
+      "name": "SCFIfPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 534,
+      "signature": "(scf.if)",
+      "core": false,
+      "purpose": "SCF if: convert result types, inline regions"
+    },
+    {
+      "name": "SCFWhilePattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 579,
+      "signature": "(scf.while)",
+      "core": false,
+      "purpose": "SCF while: convert regions, inline both (cond + body)"
+    },
+    {
+      "name": "SCFConditionPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 606,
+      "signature": "(scf.condition)",
+      "core": false,
+      "purpose": "Update operands in-place"
+    },
+    {
+      "name": "CFBranchPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 640,
+      "signature": "(cf.br)",
+      "core": false,
+      "purpose": "CF branch: forward to successor, convert successor regions"
+    },
+    {
+      "name": "CFCondBranchPattern",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 656,
+      "signature": "(cf.cond_br)",
+      "core": false,
+      "purpose": "CF cond branch with true/false successors"
+    },
+    {
+      "name": "addNamedAttrs",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 20,
+      "signature": "static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs)",
+      "core": false,
+      "purpose": "Copy dict attrs to op"
+    },
+    {
+      "name": "populateArithPatternsAndLegality",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 65,
+      "signature": "void populateArithPatternsAndLegality(TritonGPUTypeConverter &typeConverter, RewritePatternSet &patterns, TritonGPUConversionTarget &target)",
+      "core": false,
+      "purpose": "Register 60+ arith op patterns"
+    },
+    {
+      "name": "populateMathPatternsAndLegality",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 107,
+      "signature": "(14 math ops)",
+      "core": false,
+      "purpose": "Register math op patterns"
+    },
+    {
+      "name": "populateTritonPatterns",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 453,
+      "signature": "void populateTritonPatterns(TritonGPUTypeConverter &typeConverter, RewritePatternSet &patterns, unsigned numCTAs)",
+      "core": false,
+      "purpose": "Register 32+ Triton-specific patterns"
+    },
+    {
+      "name": "populateSCFPatterns",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 617,
+      "signature": "(4 SCF patterns)",
+      "core": false,
+      "purpose": "Register for/if/while/condition"
+    },
+    {
+      "name": "(CF patterns registered inline)",
+      "file": "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+      "snapshot_line": 630,
+      "signature": "—",
+      "core": false,
+      "purpose": "CFBranchPattern, CFCondBranchPattern"
+    },
+    {
+      "name": "LayoutInfo (inside LayoutPropagation)",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 59,
+      "signature": "struct LayoutInfo { llvm::SmallSetVector<Attribute, 8> encodings; }",
+      "core": false,
+      "purpose": "Track layout per value during propagation"
+    },
+    {
+      "name": "LayoutPropagation",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 64,
+      "signature": "class LayoutPropagation { ... }",
+      "core": false,
+      "purpose": "Forward layout propagation from anchor ops"
+    },
+    {
+      "name": "LayoutRematerialization",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 153,
+      "signature": "class LayoutRematerialization { ... }",
+      "core": false,
+      "purpose": "Backward rematerialization of layout conversions"
+    },
+    {
+      "name": "isLayoutAnchor",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 245,
+      "signature": "bool isLayoutAnchor(Operation *op)",
+      "core": false,
+      "purpose": "Identify ops whose layout must be preserved"
+    },
+    {
+      "name": "LayoutPropagation::initAnchorLayout",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 263,
+      "signature": "void initAnchorLayout()",
+      "core": false,
+      "purpose": "Initialize layouts from func args + anchor ops"
+    },
+    {
+      "name": "LayoutPropagation::propagateToUsers",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 283,
+      "signature": "SmallVector<Value> propagateToUsers(...)",
+      "core": false,
+      "purpose": "Propagate layout through one user's operands"
+    },
+    {
+      "name": "LayoutPropagation::propagateLayout",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 321,
+      "signature": "void propagateLayout()",
+      "core": false,
+      "purpose": "BFS propagation to all uses"
+    },
+    {
+      "name": "LayoutPropagation::resolveConflicts",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 347,
+      "signature": "void resolveConflicts()",
+      "core": false,
+      "purpose": "Heuristic: prefer Blocked for Load/Store, MMA for others"
+    },
+    {
+      "name": "LayoutPropagation::rewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 405,
+      "signature": "void rewrite()",
+      "core": false,
+      "purpose": "Top-level rewrite entry point"
+    },
+    {
+      "name": "LayoutPropagation::rewriteRegion",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 408,
+      "signature": "void rewriteRegion(Region &R)",
+      "core": false,
+      "purpose": "DFS rewrite in dominance order"
+    },
+    {
+      "name": "LayoutPropagation::getValueAs",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 545,
+      "signature": "Value getValueAs(Value, Attribute)",
+      "core": false,
+      "purpose": "Insert convert if encoding differs"
+    },
+    {
+      "name": "LayoutPropagation::rewriteOp",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 650,
+      "signature": "void rewriteOp(Operation *op)",
+      "core": false,
+      "purpose": "Dispatch to rewrite-op-type handlers"
+    },
+    {
+      "name": "LayoutRematerialization::backwardRematerialization",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1200,
+      "signature": "bool backwardRematerialization()",
+      "core": false,
+      "purpose": "Top-level rematerialization pass"
+    },
+    {
+      "name": "LayoutRematerialization::hoistConvertOnTopOfExtOrBroadcast",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1317,
+      "signature": "void hoistConvertOnTopOfExtOrBroadcast()",
+      "core": false,
+      "purpose": "Hoist over broadcast/extend ops"
+    },
+    {
+      "name": "LayoutRematerialization::hoistConvertIntoConditionals",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1332,
+      "signature": "void hoistConvertIntoConditionals()",
+      "core": false,
+      "purpose": "Move converts inside loop conditionals"
+    },
+    {
+      "name": "canBeRemat",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 671,
+      "signature": "bool canBeRemat(Operation *op)",
+      "core": false,
+      "purpose": "Check if op's backward slice can be rematerialized"
+    },
+    {
+      "name": "isExpensiveMathOp",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1065,
+      "signature": "static bool isExpensiveMathOp(Operation *op)",
+      "core": false,
+      "purpose": "Math ops with low throughput or multiple instructions"
+    },
+    {
+      "name": "getByteCount",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1077,
+      "signature": "static int64_t getByteCount(Value result, ...)",
+      "core": false,
+      "purpose": "Element count × bitwidth → byte count"
+    },
+    {
+      "name": "getConvertCost",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1105,
+      "signature": "int64_t getConvertCost(Value convertSrc, Attribute resultEncoding)",
+      "core": false,
+      "purpose": "Cost model: byte count through shared memory"
+    },
+    {
+      "name": "isRematBeneficial",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1130,
+      "signature": "bool isRematBeneficial(ConvertLayoutOp convertOp, ...)",
+      "core": false,
+      "purpose": "Cost-based decision: rematerialize or keep convert?"
+    },
+    {
+      "name": "reduceToScalar",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 452,
+      "signature": "bool reduceToScalar(Operation *op)",
+      "core": false,
+      "purpose": "ReduceOp that returns scalar (can change src enc)"
+    },
+    {
+      "name": "LayoutRematerialization::rewriteSlice",
+      "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+      "snapshot_line": 1362,
+      "signature": "void rewriteSlice(SetVector<Value> &slice, ...)",
+      "core": false,
+      "purpose": "Clone & rematerialize the slice in new encoding"
+    },
+    {
+      "name": "mmaVersionToInstrShape",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 34,
+      "signature": "SmallVector<unsigned, 3> mmaVersionToInstrShape(int version, ...)",
+      "core": false,
+      "purpose": "Instr shape for MMAv1–v5 (used by ch.15a)"
+    },
+    {
+      "name": "getOrderFromContiguity",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 90,
+      "signature": "SmallVector<unsigned, 4> getOrderFromContiguity(...)",
+      "core": false,
+      "purpose": "Sort dims by contiguity"
+    },
+    {
+      "name": "getMemAccessPtr",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 101,
+      "signature": "Value getMemAccessPtr(Operation *op)",
+      "core": false,
+      "purpose": "Extract memory pointer from load/store/atomic"
+    },
+    {
+      "name": "getElementBitWidth",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 112,
+      "signature": "unsigned getElementBitWidth(RankedTensorType type)",
+      "core": false,
+      "purpose": "Bitwidth of element type (handles pointers)"
+    },
+    {
+      "name": "getNumElementsPerThread",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 156,
+      "signature": "unsigned getNumElementsPerThread(Operation *op, ...)",
+      "core": false,
+      "purpose": "Alignment × contiguity → elements per thread"
+    },
+    {
+      "name": "isView",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 200,
+      "signature": "bool isView(Operation *op)",
+      "core": false,
+      "purpose": "Reshape/Trans/Expand/Split/Join"
+    },
+    {
+      "name": "isNoop",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 204,
+      "signature": "bool isNoop(Operation *op)",
+      "core": false,
+      "purpose": "Convert/Reshape/Trans that is identity"
+    },
+    {
+      "name": "inferSrcEncoding (generic)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 586,
+      "signature": "Attribute inferSrcEncoding(Operation *op, Attribute encoding)",
+      "core": false,
+      "purpose": "Generic dispatch for source-encoding inference"
+    },
+    {
+      "name": "inferDstEncoding (generic)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 613,
+      "signature": "Attribute inferDstEncoding(Operation *op, Attribute encoding)",
+      "core": false,
+      "purpose": "Generic dispatch for destination-encoding inference"
+    },
+    {
+      "name": "isExpensiveLoadOrStore",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 639,
+      "signature": "bool isExpensiveLoadOrStore(Operation *op)",
+      "core": false,
+      "purpose": "Multi-thread load worth converting layout for"
+    },
+    {
+      "name": "canUseResultEncoding",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 661,
+      "signature": "bool canUseResultEncoding(Operation *op, Attribute targetEncoding)",
+      "core": false,
+      "purpose": "Can result be in target encoding without rewrite?"
+    },
+    {
+      "name": "getConvertBackwardSlice",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1085,
+      "signature": "LogicalResult getConvertBackwardSlice(OpOperand &root, ...)",
+      "core": false,
+      "purpose": "Extract & layout-infer backward dependency slice"
+    },
+    {
+      "name": "replaceForOpWithNewSignature",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 796,
+      "signature": "(scf.for w/ extra carries)",
+      "core": false,
+      "purpose": "Clone scf.for with extra loop-carried values"
+    },
+    {
+      "name": "replaceWhileOpWithNewSignature",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 838,
+      "signature": "(scf.while w/ extra)",
+      "core": false,
+      "purpose": "Clone scf.while with extra values"
+    },
+    {
+      "name": "replaceIfOpWithNewSignature",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 905,
+      "signature": "(scf.if w/ extra results)",
+      "core": false,
+      "purpose": "Clone scf.if with extra results"
+    },
+    {
+      "name": "isSingleValue",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 530,
+      "signature": "",
+      "core": false,
+      "purpose": "Single-element tensors are cheap to load"
+    },
+    {
+      "name": "swizzleDotOperandLike",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1440,
+      "signature": "",
+      "core": false,
+      "purpose": "Infer shared encoding for dot operand from microtile"
+    },
+    {
+      "name": "getSharedEncIfAllUsersAreDotEnc",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1497,
+      "signature": "",
+      "core": false,
+      "purpose": "Check if all uses convert to DotOp encoding"
+    },
+    {
+      "name": "delinearize (3 overloads)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1216,
+      "signature": "",
+      "core": false,
+      "purpose": "Multi-dim coord from linear index"
+    },
+    {
+      "name": "linearize (2 overloads)",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1263,
+      "signature": "",
+      "core": false,
+      "purpose": "Multi-dim → linear with order"
+    },
+    {
+      "name": "cloneWithInferType",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1287,
+      "signature": "",
+      "core": false,
+      "purpose": "Clone op, infer new result types"
+    },
+    {
+      "name": "isPureUnaryInlineAsm",
+      "file": "lib/Dialect/TritonGPU/Transforms/Utility.cpp",
+      "snapshot_line": 1323,
+      "signature": "",
+      "core": false,
+      "purpose": "Single-input, single-output inline asm"
+    },
+    {
+      "name": "BlockedToMMA",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 476,
+      "signature": "class BlockedToMMA : public OpRewritePattern<DotOp>",
+      "core": true,
+      "purpose": "Rewrite DotOp to MMA for SM 7.5–9.0"
+    },
+    {
+      "name": "BlockedToMMAv5",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 672,
+      "signature": "class BlockedToMMAv5 : public OpRewritePattern<DotOp>",
+      "core": false,
+      "purpose": "MMAv5 for SM 10+ (DROP for ch.15a)"
+    },
+    {
+      "name": "ScaledBlockedToMMA",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 822,
+      "signature": "class ScaledBlockedToMMA : public OpRewritePattern<DotScaledOp>",
+      "core": false,
+      "purpose": "Scaled dot for SM 12 (DROP for ch.15a)"
+    },
+    {
+      "name": "TritonGPUAccelerateMatmulPass",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 898,
+      "signature": "class TritonGPUAccelerateMatmulPass : public ...",
+      "core": false,
+      "purpose": "Top-level pass orchestration"
+    },
+    {
+      "name": "getMMAVersionSafe",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 53,
+      "signature": "static int getMMAVersionSafe(int computeCapability, DotOp op)",
+      "core": true,
+      "purpose": "Select MMA version (1→2→3→5) based on SM & shape"
+    },
+    {
+      "name": "warpsPerTileV2",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 90,
+      "signature": "SmallVector<unsigned> warpsPerTileV2(DotOpInterface, ...)",
+      "core": false,
+      "purpose": "Warp distribution for MMAv2 (SM 7.5–8.9)"
+    },
+    {
+      "name": "warpsPerTileV3",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 145,
+      "signature": "SmallVector<unsigned, 2> warpsPerTileV3(DotOpInterface, ...)",
+      "core": false,
+      "purpose": "Warp distribution for MMAv3 (SM 9.0+)"
+    },
+    {
+      "name": "createMMAEncodingForDot",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 189,
+      "signature": "static MMAEncodingResult createMMAEncodingForDot(...)",
+      "core": false,
+      "purpose": "Generate `NvidiaMmaEncodingAttr` + converted accumulator"
+    },
+    {
+      "name": "convertDotOperandForMMA",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 236,
+      "signature": "static Value convertDotOperandForMMA(Value v, int opIdx, ...)",
+      "core": false,
+      "purpose": "Wrap operand in `DotOperandEncodingAttr`"
+    },
+    {
+      "name": "getSharedMemoryMMAOperand",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 319,
+      "signature": "static Value getSharedMemoryMMAOperand(...)",
+      "core": false,
+      "purpose": "Allocate SMEM for MMA operand with correct encoding"
+    },
+    {
+      "name": "promoteOperand",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 658,
+      "signature": "static Value promoteOperand(OpBuilder &, ...)",
+      "core": false,
+      "purpose": "FP4/FP8 → FP16 promotion for FMA fallback"
+    },
+    {
+      "name": "decomposeMixedModeDotOp",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 671,
+      "signature": "static void decomposeMixedModeDotOp(ModuleOp mod, ...)",
+      "core": false,
+      "purpose": "Promote operands if unsupported precision mix"
+    },
+    {
+      "name": "BlockedToMMA::matchAndRewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+      "snapshot_line": 507,
+      "signature": "LogicalResult BlockedToMMA::matchAndRewrite(DotOp, ...)",
+      "core": true,
+      "purpose": "Core MMAv1–v3 pattern"
+    },
+    {
+      "name": "SwizzleShmemConvert",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 28,
+      "signature": "class SwizzleShmemConvert : public OpRewritePattern<ConvertLayoutOp>",
+      "core": false,
+      "purpose": "Optimize convert(trans(shared)) → specialized swizzle"
+    },
+    {
+      "name": "FuseTransMMAV3Plus",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 87,
+      "signature": "class FuseTransMMAV3Plus : public OpRewritePattern<LocalAllocOp>",
+      "core": false,
+      "purpose": "Fold transpose into shared allocation for MMAv3+"
+    },
+    {
+      "name": "ReshapeMemDesc",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 138,
+      "signature": "class ReshapeMemDesc : public OpRewritePattern<LocalAllocOp>",
+      "core": false,
+      "purpose": "Fold reshape into MemDesc for MMAv3+"
+    },
+    {
+      "name": "RewriteMmaOperandViewsToMemDescForDotOp",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 169,
+      "signature": "class RewriteMmaOperandViewsToMemDescForDotOp : public OpInterfaceRewritePattern<DotOpInterface>",
+      "core": false,
+      "purpose": "Hoist local_alloc above tensor views for MMA operands"
+    },
+    {
+      "name": "SwizzleShmemConvert::matchAndRewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 35,
+      "signature": "LogicalResult matchAndRewrite(...)",
+      "core": false,
+      "purpose": "Detect & optimize shared memory swizzling"
+    },
+    {
+      "name": "FuseTransMMAV3Plus::matchAndRewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 99,
+      "signature": "LogicalResult matchAndRewrite(...)",
+      "core": false,
+      "purpose": "Fuse transpose into shared allocation"
+    },
+    {
+      "name": "ReshapeMemDesc::matchAndRewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 150,
+      "signature": "LogicalResult matchAndRewrite(...)",
+      "core": false,
+      "purpose": "Fuse reshape into MemDesc"
+    },
+    {
+      "name": "RewriteMmaOperandViewsToMemDescForDotOp::matchAndRewrite",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 182,
+      "signature": "LogicalResult matchAndRewrite(DotOpInterface, ...)",
+      "core": false,
+      "purpose": "Back-propagate MMA layout through views"
+    },
+    {
+      "name": "RewriteMmaOperandViewsToMemDescForDotOp::rewriteOperand",
+      "file": "lib/Dialect/TritonGPU/Transforms/OptimizeDotOperands.cpp",
+      "snapshot_line": 215,
+      "signature": "LogicalResult rewriteOperand(Value, ...)",
+      "core": false,
+      "purpose": "Single-operand rewrite logic"
+    },
+    {
+      "name": "LocalMemOpTile",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 45,
+      "signature": "(used by getSrcDstTiles)",
+      "core": false,
+      "purpose": "Tile dimensions for ld/st ops"
+    },
+    {
+      "name": "SharedMemoryObject",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1722,
+      "signature": "ctors + getShmemOffset / getShmemAffineBase / getMaskSpanOffsets",
+      "core": false,
+      "purpose": "Encapsulates shared memory base & offsets"
+    },
+    {
+      "name": "getSrcDstTiles",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 48,
+      "signature": "SmallVector<std::pair<LocalMemOpTile, LocalMemOpTile>> getSrcDstTiles(const TargetInfoBase &, int, bool)",
+      "core": false,
+      "purpose": "Query target for ld/st tile shapes (ldmatrix, stmatrix)"
+    },
+    {
+      "name": "emitIndices",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 679,
+      "signature": "SmallVector<SmallVector<Value>> emitIndices(Location, RewriterBase&, const TargetInfoBase&, const LinearLayout&, RankedTensorType, bool)",
+      "core": true,
+      "purpose": "Core: emit LLVM i32 indices per register (vectorized)"
+    },
+    {
+      "name": "applyLinearLayout",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 410,
+      "signature": "SmallVector<std::pair<StringAttr, Value>> applyLinearLayout(Location, RewriterBase&, const LinearLayout&, ArrayRef<std::pair<StringAttr, Value>>)",
+      "core": true,
+      "purpose": "Core: matrix-vector product for layout transformation"
+    },
+    {
+      "name": "lowerLdSt",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1058,
+      "signature": "SmallVector<Value> lowerLdSt(Location, MLIRContext*, LinearLayout, ArrayRef<Value>, Type, ArrayRef<Value>, ArrayRef<std::pair<unsigned,unsigned>>, Value, uint64_t, Value, Value, RewriterBase&, const TargetInfoBase&, std::optional<int>, std::function<...> lowerInst)",
+      "core": true,
+      "purpose": "Core: lower load/store to shared; emit address calc + memory ops"
+    },
+    {
+      "name": "lowerLocalLdSt",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1297,
+      "signature": "SmallVector<Value> lowerLocalLdSt(Location, MLIRContext*, LinearLayout, ArrayRef<Value>, Type, MemDescType, SharedMemoryObject, RewriterBase&, const TargetInfoBase&, Operation*)",
+      "core": true,
+      "purpose": "Core: lower local alloc load/store via MemDesc"
+    },
+    {
+      "name": "lowerLdStShared",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 835,
+      "signature": "(shared-mem dispatcher)",
+      "core": false,
+      "purpose": "Dispatcher for shared memory load/store ops"
+    },
+    {
+      "name": "computeLocalPtrs",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 717,
+      "signature": "SmallVector<Value> computeLocalPtrs(...)",
+      "core": false,
+      "purpose": "Compute per-lane shared memory pointers (via inverted layout)"
+    },
+    {
+      "name": "matrixVectorProd",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 127,
+      "signature": "Value matrixVectorProd(TritonLLVMOpBuilder&, const LinearLayout&, Value)",
+      "core": true,
+      "purpose": "Core: emit matrix-vector product (masks, shifts, ORs, XORs) for layout"
+    },
+    {
+      "name": "getThreadId",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 548,
+      "signature": "Value getThreadId(OpBuilder&, Location)",
+      "core": false,
+      "purpose": "Extract thread ID from GPU inline asm"
+    },
+    {
+      "name": "getLaneAndWarpId",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 594,
+      "signature": "std::pair<Value, Value> getLaneAndWarpId(OpBuilder&, Location)",
+      "core": false,
+      "purpose": "Extract lane ID and warp ID"
+    },
+    {
+      "name": "getLaneId",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 612,
+      "signature": "(wrapper)",
+      "core": false,
+      "purpose": "Extract lane ID"
+    },
+    {
+      "name": "maybeAnd",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 359,
+      "signature": "Value maybeAnd(OpBuilder&, Location, Value, Value)",
+      "core": false,
+      "purpose": "AND two values if both non-null"
+    },
+    {
+      "name": "unpackLLElements",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1368,
+      "signature": "SmallVector<Value> unpackLLElements(Location, Value, RewriterBase&)",
+      "core": false,
+      "purpose": "Extract elements from LLVM struct"
+    },
+    {
+      "name": "packLLElements",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1388,
+      "signature": "Value packLLElements(...)",
+      "core": false,
+      "purpose": "Pack values into LLVM struct"
+    },
+    {
+      "name": "unpackLLVector",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1425,
+      "signature": "SmallVector<Value> unpackLLVector(Location, Value, RewriterBase&)",
+      "core": false,
+      "purpose": "Extract elements from LLVM vector"
+    },
+    {
+      "name": "packLLVector",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1458,
+      "signature": "Value packLLVector(Location, ValueRange, RewriterBase&)",
+      "core": false,
+      "purpose": "Pack values into LLVM vector"
+    },
+    {
+      "name": "getFunctionType",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 87,
+      "signature": "(build LLVM fn type)",
+      "core": false,
+      "purpose": "Helper"
+    },
+    {
+      "name": "appendOrGetExternFuncOp",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 90,
+      "signature": "(declare/get extern)",
+      "core": false,
+      "purpose": "Helper for libdevice"
+    },
+    {
+      "name": "matchAtomicOp",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1474,
+      "signature": "std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp)",
+      "core": false,
+      "purpose": "Convert Triton RMW to LLVM atomic"
+    },
+    {
+      "name": "getMemoryOrdering",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1503,
+      "signature": "std::optional<LLVM::AtomicOrdering> getMemoryOrdering(MemSemantic)",
+      "core": false,
+      "purpose": "Convert MemSemantic to LLVM ordering"
+    },
+    {
+      "name": "emitOffsetForLayout",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1595,
+      "signature": "SmallVector<SmallVector<unsigned>> emitOffsetForLayout(Attribute, RankedTensorType)",
+      "core": false,
+      "purpose": "Emit offsets for all register elements"
+    },
+    {
+      "name": "getFreeVariableMasks",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1579,
+      "signature": "(layout free-var masks)",
+      "core": false,
+      "purpose": "Helper"
+    },
+    {
+      "name": "getAllFreeVarMasks",
+      "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+      "snapshot_line": 1567,
+      "signature": "(all-dims masks)",
+      "core": false,
+      "purpose": "Helper"
+    },
+    {
+      "name": "LocalAllocOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 172,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::LocalAllocOp>",
+      "core": false,
+      "purpose": "Allocate shared memory MemDesc"
+    },
+    {
+      "name": "LocalDeallocOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 210,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::LocalDeallocOp>",
+      "core": false,
+      "purpose": "Deallocate (no-op)"
+    },
+    {
+      "name": "LocalLoadOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 222,
+      "signature": "ConvertOpToLLVMPattern<LocalLoadOp>",
+      "core": false,
+      "purpose": "Load from shared memory MemDesc"
+    },
+    {
+      "name": "LocalStoreOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 268,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::LocalStoreOp>",
+      "core": false,
+      "purpose": "Store to shared memory MemDesc"
+    },
+    {
+      "name": "GlobalScratchAllocOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 103,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::GlobalScratchAllocOp>",
+      "core": false,
+      "purpose": "Global scratch buffer allocation"
+    },
+    {
+      "name": "BarrierOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 300,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::BarrierOp>",
+      "core": false,
+      "purpose": "Emit GPU barrier"
+    },
+    {
+      "name": "lowerLocalScGt",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 19,
+      "signature": "SmallVector<Value> lowerLocalScGt(...)",
+      "core": false,
+      "purpose": "Shared helper for gather/scatter ops"
+    },
+    {
+      "name": "lowerLocalStore",
+      "file": "lib/Conversion/TritonGPUToLLVM/MemoryOpToLLVM.cpp",
+      "snapshot_line": 52,
+      "signature": "LogicalResult lowerLocalStore(...)",
+      "core": false,
+      "purpose": "Shared store backend (used by `LocalStoreOp`, `LocalAllocOp`)"
+    },
+    {
+      "name": "SplatOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 62,
+      "signature": "ConvertOpToLLVMPattern<triton::SplatOp>",
+      "core": false,
+      "purpose": "Convert splat to struct of copies"
+    },
+    {
+      "name": "UnsplatOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 124,
+      "signature": "ConvertOpToLLVMPattern<triton::UnsplatOp>",
+      "core": false,
+      "purpose": "Extract scalar from splat"
+    },
+    {
+      "name": "ArithConstantSplatOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 141,
+      "signature": "ConvertOpToLLVMPattern<arith::ConstantOp>",
+      "core": false,
+      "purpose": "Constant splat (`SplatElementsAttr`)"
+    },
+    {
+      "name": "CatOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 198,
+      "signature": "ConvertOpToLLVMPattern<CatOp>",
+      "core": false,
+      "purpose": "Concatenate tensors"
+    },
+    {
+      "name": "JoinOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 270,
+      "signature": "ConvertOpToLLVMPattern<JoinOp>",
+      "core": false,
+      "purpose": "Join dimension"
+    },
+    {
+      "name": "SplitOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 318,
+      "signature": "ConvertOpToLLVMPattern<SplitOp>",
+      "core": false,
+      "purpose": "Split dimension"
+    },
+    {
+      "name": "ReshapeOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 369,
+      "signature": "ConvertOpToLLVMPattern<ReshapeOp>",
+      "core": false,
+      "purpose": "Reshape (no-op if layout-preserving)"
+    },
+    {
+      "name": "ExpandDimsOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 388,
+      "signature": "ConvertOpToLLVMPattern<ExpandDimsOp>",
+      "core": false,
+      "purpose": "Add dimension (SliceEncoding only)"
+    },
+    {
+      "name": "MemDescTransOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 443,
+      "signature": "ConvertOpToLLVMPattern<MemDescTransOp>",
+      "core": false,
+      "purpose": "Transpose MemDesc offsets"
+    },
+    {
+      "name": "MemDescReshapeOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 465,
+      "signature": "ConvertOpToLLVMPattern<MemDescReshapeOp>",
+      "core": false,
+      "purpose": "Reshape MemDesc"
+    },
+    {
+      "name": "TransOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 505,
+      "signature": "ConvertOpToLLVMPattern<TransOp>",
+      "core": false,
+      "purpose": "Transpose (no-op if same encoding)"
+    },
+    {
+      "name": "BroadcastOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 517,
+      "signature": "ConvertOpToLLVMPattern<triton::BroadcastOp>",
+      "core": false,
+      "purpose": "Broadcast along size-1 dims"
+    },
+    {
+      "name": "MemDescIndexOpConversion",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 602,
+      "signature": "ConvertOpToLLVMPattern<triton::gpu::MemDescIndexOp>",
+      "core": false,
+      "purpose": "Index into multi-buffer MemDesc"
+    },
+    {
+      "name": "bitOrPtrCast",
+      "file": "lib/Conversion/TritonGPUToLLVM/ViewOpToLLVM.cpp",
+      "snapshot_line": 24,
+      "signature": "Value bitOrPtrCast(Value, Type, TritonLLVMOpBuilder&)",
+      "core": false,
+      "purpose": "Bitcast or ptrtoint as needed"
+    }
+  ],
+  "concepts": {
+    "convert_layout": {
+      "op": "ttg.convert_layout",
+      "what": "Repartition a tensor from one layout encoding to another; physically lowered through shared memory.",
+      "produced_by": [
+        {
+          "site": "add_convert_to_ttgpuir",
+          "how": "TTIR->TTGIR bridge assigns a default Blocked encoding; converts appear at layout boundaries"
+        },
+        {
+          "site": "add_accelerate_matmul",
+          "how": "installs MMA encodings on dot ops, inserting converts around them"
+        },
+        {
+          "site": "LayoutPropagation::getValueAs",
+          "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+          "how": "inserts a convert when a value's encoding differs from the target"
+        }
+      ],
+      "eliminated_by": [
+        {
+          "site": "add_remove_layout_conversions",
+          "runs": 3,
+          "how": "3-run fixed-point GC: (1) bridge converts, (2) matmul/dot converts, (3) late pipeline/async-copy converts"
+        },
+        {
+          "site": "LayoutRematerialization::rewriteSlice",
+          "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+          "how": "clones the convert's backward slice in the target encoding"
+        },
+        {
+          "site": "LayoutRematerialization::hoistConvertOnTopOfExtOrBroadcast",
+          "file": "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp",
+          "how": "hoists a convert above broadcast / type-extend ops"
+        }
+      ],
+      "lowered_by": [
+        {
+          "site": "applyLinearLayout",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "matrix-vector product computing the layout transform"
+        },
+        {
+          "site": "emitIndices",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "emits per-register LLVM indices for the converted tensor"
+        }
+      ],
+      "notes": "remove_layout_conversions appears 3x in make_ttgir as a fixed-point garbage collector for convert noise (golden-pass-list section 7)."
+    },
+    "coalesce": {
+      "op": "vectorized tt.load / tt.store (Blocked layout reorder)",
+      "what": "Reorder each memory op's Blocked encoding so adjacent lanes touch contiguous addresses, enabling wide vector loads (ld.global.v4) instead of scattered single-element accesses.",
+      "produced_by": [
+        {
+          "site": "add_convert_to_ttgpuir",
+          "how": "bridge assigns a generic Blocked encoding, often NOT coalesced for the access pattern"
+        }
+      ],
+      "eliminated_by": [
+        {
+          "site": "add_coalesce",
+          "file": "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+          "how": "picks a per-op Blocked encoding whose fastest dim matches the contiguous memory dim; wraps in convert_layout"
+        },
+        {
+          "site": "add_coalesce_async_copy",
+          "how": "coalesces async-copy traffic on the Ampere path"
+        }
+      ],
+      "lowered_by": [
+        {
+          "site": "getNumConsecutiveInOut",
+          "file": "lib/Tools/LinearLayout.cpp",
+          "how": "queries the layout for the max contiguous run -> vector width"
+        },
+        {
+          "site": "lowerLdSt",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "emits the vectorized load/store using that width"
+        }
+      ],
+      "notes": "Coalescing is thesis optimization T3a; vector width comes from LinearLayout.getNumConsecutiveInOut() on the lane->addr sublayout."
+    },
+    "pipeline": {
+      "op": "ttg.async_copy_global_to_local + multi-buffered local_alloc",
+      "what": "Software-pipeline loop loads: prefetch future iterations into multi-buffered shared memory with async copies so compute and memory overlap (Ampere SM 8.x).",
+      "produced_by": [
+        {
+          "site": "add_assign_latencies",
+          "how": "annotates each staged op with a pipeline latency"
+        },
+        {
+          "site": "add_schedule_loops",
+          "how": "chooses producer/consumer ordering for the schedule"
+        }
+      ],
+      "eliminated_by": [
+        {
+          "site": "add_pipeline",
+          "how": "materializes the async pipeline: inserts async_copy + async_wait, multi-buffers the shared allocation"
+        }
+      ],
+      "lowered_by": [
+        {
+          "site": "add_coalesce_async_copy",
+          "how": "merges async-copy traffic before LLVM lowering"
+        },
+        {
+          "site": "lowerLocalLdSt",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "lowers the staged local loads/stores to LLVM"
+        }
+      ],
+      "notes": "SM 8.x only (Ampere async-copy). Hopper (SM 9+) uses TMA + warp specialization instead — out of the SM 7.5-8.9 slice."
+    },
+    "shared_memory": {
+      "op": "ttg.local_alloc / ttg.local_load / ttg.local_store",
+      "what": "Staging tensors in GPU shared memory for cross-thread exchange (e.g. layout conversion, matmul operands).",
+      "produced_by": [
+        {
+          "site": "add_accelerate_matmul",
+          "how": "MMA operands are staged in shared memory"
+        },
+        {
+          "site": "add_pipeline",
+          "how": "software pipelining allocates multi-buffered shared memory"
+        }
+      ],
+      "eliminated_by": [
+        {
+          "site": "add_allocate_shared_memory",
+          "how": "assigns concrete shared-memory offsets to local_alloc ops"
+        }
+      ],
+      "lowered_by": [
+        {
+          "site": "lowerLocalLdSt",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "lowers local load/store to address calc + LLVM memory ops"
+        },
+        {
+          "site": "SharedMemoryObject",
+          "file": "lib/Conversion/TritonGPUToLLVM/Utility.cpp",
+          "how": "encapsulates shared-memory base pointer and per-lane offsets"
+        }
+      ],
+      "notes": "Swizzling (SwizzledSharedEncoding) avoids bank conflicts; see encoding spec swizzled-shared-encoding.md."
+    },
+    "mma": {
+      "op": "tt.dot -> NvidiaMmaEncoding",
+      "what": "Tensor-core matrix multiply: BlockedEncoding dot operands are converted to MMA/DotOperand encodings, then lowered to mma.sync PTX.",
+      "produced_by": [
+        {
+          "site": "add_accelerate_matmul",
+          "file": "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+          "how": "selects the MMA instruction shape and installs MmaEncoding"
+        },
+        {
+          "site": "add_optimize_dot_operands",
+          "how": "normalizes dot operands into DotOperandEncoding"
+        }
+      ],
+      "eliminated_by": [
+        {
+          "site": "add_lower_mma",
+          "how": "lowers abstract MMA ops to target mma.sync form (NVIDIA)"
+        }
+      ],
+      "lowered_by": [
+        {
+          "site": "DotOpToLLVM",
+          "file": "lib/Conversion/TritonGPUToLLVM/DotOpToLLVM.cpp",
+          "how": "emits mma.sync.* PTX inline asm per warp tile"
+        }
+      ],
+      "notes": "MMAv2 (m16n8k16 fp16/bf16) is the in-slice target for SM 7.5-8.9."
+    }
+  }
+}

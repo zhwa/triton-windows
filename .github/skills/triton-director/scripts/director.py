@@ -39,6 +39,7 @@ def cmd_help(args):
     cmds = [
         ("help",    "Show this help message"),
         ("scan",    "Scan the repo — list skills, tools, docs, and test files"),
+        ("skills",  "List every skill and what it can do (commands per skill)"),
         ("init",    "Show the step-by-step journey to build & run from scratch"),
         ("inspect", "Capture IR at every pipeline stage (wraps inspector.py)"),
         ("time",    "Per-pass compilation timing (wraps timer.py)"),
@@ -130,6 +131,43 @@ def _extract_skill_description(skill_file):
         return None
 
 
+def _extract_skill_meta(skill_file):
+    """Extract full description + argument-hint (the skill's capabilities)."""
+    meta = {"description": None, "argument_hint": None}
+    try:
+        with open(skill_file, "r", encoding="utf-8") as f:
+            text = f.read(4000)
+    except Exception:
+        return meta
+    md = re.search(r'description:\s*"([^"]+)"', text)
+    if md:
+        meta["description"] = md.group(1).strip()
+    mh = re.search(r'argument-hint:\s*"([^"]+)"', text)
+    if mh:
+        meta["argument_hint"] = mh.group(1).strip()
+    return meta
+
+
+def _skill_entry_scripts(skill_dir):
+    """Return likely entry-point scripts for a skill (excludes helpers/generators)."""
+    scripts = os.path.join(skill_dir, "scripts")
+    if not os.path.isdir(scripts):
+        return []
+    py = [f for f in os.listdir(scripts)
+          if f.endswith(".py")
+          and not f.startswith("_")
+          and not f.startswith("generate_")
+          and f != "__init__.py"]
+    if not py:
+        return []
+    name = os.path.basename(skill_dir)
+    # primary first: a script whose stem matches the skill's last name segment,
+    # then alphabetical (puts e.g. dissector before locator)
+    seg = name.split("-")[-1]
+    py.sort(key=lambda f: (seg not in os.path.splitext(f)[0], f))
+    return [os.path.join("scripts", f) for f in py]
+
+
 def _extract_title(md_file):
     """Extract the first # heading from a markdown file."""
     try:
@@ -149,6 +187,51 @@ def _count_lines(path):
             return sum(1 for _ in f)
     except Exception:
         return 0
+
+
+# ── skills ─────────────────────────────────────────────────────────────────
+def cmd_skills(args):
+    """List every skill and what it can do (description + commands)."""
+    skills_dir = os.path.join(_repo_root, ".github", "skills")
+    if not os.path.isdir(skills_dir):
+        print(red("  No .github/skills/ directory found"))
+        return
+
+    entries = sorted(d for d in os.listdir(skills_dir)
+                     if os.path.isfile(os.path.join(skills_dir, d, "SKILL.md")))
+
+    # If a skill name is given, show just that one (full detail)
+    target = getattr(args, "name", None)
+    if target:
+        match = next((e for e in entries if target.lower() in e.lower()), None)
+        if not match:
+            print(yellow(f"  No skill matching '{target}'. Known: " + ", ".join(entries)))
+            return
+        entries = [match]
+
+    print(bold("\n  Triton-Windows Skills — What Each One Can Do\n"))
+    for entry in entries:
+        skill_dir = os.path.join(skills_dir, entry)
+        meta = _extract_skill_meta(os.path.join(skill_dir, "SKILL.md"))
+        scripts = _skill_entry_scripts(skill_dir)
+
+        print(f"  {bold(green(entry))}")
+        if meta["description"]:
+            # show the actionable part: keep through the first 2 sentences
+            desc = meta["description"]
+            sents = desc.split(". ")
+            blurb = ". ".join(sents[:2]).rstrip(".") + "."
+            for line in textwrap.wrap(blurb, 74):
+                print(f"      {dim(line)}")
+        if meta["argument_hint"]:
+            print(f"      {cyan('commands:')} {meta['argument_hint']}")
+        for script in scripts[:2]:
+            rel = os.path.join(".github", "skills", entry, script).replace("\\", "/")
+            print(f"      {dim('run:')} python {rel} <command>")
+        print()
+
+    if not target:
+        print(dim("  Tip: 'skills <name>' for one skill; 'scan' for docs/tools/tests too.\n"))
 
 
 # ── init ──────────────────────────────────────────────────────────────────
@@ -311,8 +394,11 @@ def cmd_test(args):
 
 # ── main ──────────────────────────────────────────────────────────────────
 def main():
-    if sys.platform == "win32":
+    # Portable UTF-8 stdout (works on every platform; no win32-specific check).
+    try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(
         prog="triton-director",
         description="Beginner-friendly CLI for triton-windows development",
@@ -342,6 +428,9 @@ def main():
 
     sub.add_parser("test", help="Run the Vulkan GPU test suite")
 
+    p_skills = sub.add_parser("skills", help="List every skill and what it can do")
+    p_skills.add_argument("name", nargs="?", help="Show one skill in detail")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -352,6 +441,7 @@ def main():
         "inspect": cmd_inspect,
         "time": cmd_time,
         "test": cmd_test,
+        "skills": cmd_skills,
     }
 
     if args.command in dispatch:
